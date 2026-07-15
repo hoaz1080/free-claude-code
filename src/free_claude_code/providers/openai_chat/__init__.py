@@ -5,7 +5,7 @@ from free_claude_code.providers.rate_limit import ProviderRateLimiter
 
 from .base_url import openai_v1_base_url
 from .extra_body import validate_extra_body_does_not_override_canonical_fields
-from .profiles import OPENAI_CHAT_PROFILES, OpenAIChatProfile
+from .profiles import GENERIC_OPENAI_PROFILE_ID, OPENAI_CHAT_PROFILES, OpenAIChatProfile
 from .provider import OpenAIChatProvider
 from .request_policy import OpenAIChatRequestPolicy, build_openai_chat_request_body
 from .usage import usage_int
@@ -28,6 +28,7 @@ def create_openai_chat_provider(
 
 
 __all__ = [
+    "GENERIC_OPENAI_PROFILE_ID",
     "OPENAI_CHAT_PROFILES",
     "OpenAIChatProfile",
     "OpenAIChatProvider",

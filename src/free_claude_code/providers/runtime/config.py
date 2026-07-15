@@ -1,6 +1,7 @@
 """Provider configuration construction from neutral catalog metadata."""
 
 from free_claude_code.application.errors import ApplicationUnavailableError
+from free_claude_code.config.custom_providers import merge_legacy_keys
 from free_claude_code.config.provider_catalog import ProviderDescriptor
 from free_claude_code.config.settings import Settings
 from free_claude_code.providers.base import ProviderConfig
@@ -38,11 +39,28 @@ def require_provider_credential(
 
 
 def build_provider_config(
-    descriptor: ProviderDescriptor, settings: Settings
+    descriptor: ProviderDescriptor,
+    settings: Settings,
+    *,
+    custom_api_keys: tuple[str, ...] | None = None,
 ) -> ProviderConfig:
-    """Build shared provider configuration for one provider descriptor."""
-    credential = provider_credential(descriptor, settings)
-    require_provider_credential(descriptor, credential)
+    """Build shared provider configuration for one provider descriptor.
+
+    When *custom_api_keys* is provided, those keys are used directly
+    (for custom providers whose keys don't come from env vars).
+    Otherwise, the credential from *descriptor* is parsed for
+    comma-separated keys (backward-compatible multi-key support).
+    """
+    if custom_api_keys is not None:
+        api_keys = custom_api_keys
+        api_key = api_keys[0] if api_keys else ""
+    else:
+        credential = provider_credential(descriptor, settings)
+        if descriptor.credential_env is not None:
+            require_provider_credential(descriptor, credential)
+        api_keys = merge_legacy_keys(descriptor, credential)
+        api_key = credential.strip() if credential else ""
+
     base_url = string_setting(
         settings, descriptor.base_url_attr, descriptor.default_base_url or ""
     )
@@ -53,7 +71,8 @@ def build_provider_config(
         )
     proxy = string_setting(settings, descriptor.proxy_attr)
     return ProviderConfig(
-        api_key=credential,
+        api_key=api_key,
+        api_keys=api_keys,
         base_url=resolved_base_url,
         rate_limit=settings.provider_rate_limit,
         rate_window=settings.provider_rate_window,

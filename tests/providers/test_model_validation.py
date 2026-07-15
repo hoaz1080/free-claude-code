@@ -65,7 +65,9 @@ def _manager(
     providers = providers or {}
     return ProviderRuntimeManager(
         settings,
-        runtime_factory=lambda snapshot: ProviderRuntime(snapshot, dict(providers)),
+        runtime_factory=lambda snapshot, *, dynamic_catalog=None: ProviderRuntime(
+            snapshot, dict(providers), dynamic_catalog=dynamic_catalog
+        ),
     )
 
 

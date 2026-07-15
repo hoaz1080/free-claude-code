@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import MutableMapping
 
+from free_claude_code.config.dynamic_catalog import DynamicProviderCatalog
 from free_claude_code.config.settings import Settings
 from free_claude_code.providers.base import BaseProvider
 
@@ -16,9 +17,12 @@ class ProviderRuntime:
         self,
         settings: Settings,
         providers: MutableMapping[str, BaseProvider] | None = None,
+        *,
+        dynamic_catalog: DynamicProviderCatalog | None = None,
     ) -> None:
         self.settings = settings
         self._providers = providers if providers is not None else {}
+        self._dynamic_catalog = dynamic_catalog
 
     def is_cached(self, provider_id: str) -> bool:
         """Return whether a provider for this id is already cached."""
@@ -27,7 +31,11 @@ class ProviderRuntime:
     def resolve_provider(self, provider_id: str) -> BaseProvider:
         """Return an existing provider or create it lazily."""
         if provider_id not in self._providers:
-            self._providers[provider_id] = create_provider(provider_id, self.settings)
+            self._providers[provider_id] = create_provider(
+                provider_id,
+                self.settings,
+                dynamic_catalog=self._dynamic_catalog,
+            )
         return self._providers[provider_id]
 
     async def cleanup(self) -> None:

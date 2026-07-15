@@ -21,8 +21,8 @@ from free_claude_code.runtime.provider_manager import ProviderRuntimeManager
 
 
 class TrackingRuntime(ProviderRuntime):
-    def __init__(self, settings: Settings) -> None:
-        super().__init__(settings)
+    def __init__(self, settings: Settings, *, dynamic_catalog=None) -> None:
+        super().__init__(settings, dynamic_catalog=dynamic_catalog)
         self.cleanup_calls = 0
 
     async def cleanup(self) -> None:
@@ -36,11 +36,11 @@ class TrackingFactory:
         self.fail = False
         self.events: list[str] = []
 
-    def __call__(self, settings: Settings) -> ProviderRuntime:
+    def __call__(self, settings: Settings, *, dynamic_catalog=None) -> ProviderRuntime:
         self.events.append(f"construct:{settings.model}")
         if self.fail:
             raise RuntimeError("candidate failed")
-        runtime = TrackingRuntime(settings)
+        runtime = TrackingRuntime(settings, dynamic_catalog=dynamic_catalog)
         self.runtimes.append(runtime)
         return runtime
 

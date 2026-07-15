@@ -49,6 +49,7 @@ async def _create_messages_response(
             provider_resolver=_provider_resolver(lease),
             token_counter=get_token_count,
             generation_id=lease.generation_id,
+            dynamic_catalog=lease.dynamic_catalog,
         )
         response = await handler.create(request_data, request_id=request_id)
     except ApplicationError as exc:
@@ -80,6 +81,7 @@ async def _create_responses_response(
             lease.settings,
             provider_resolver=_provider_resolver(lease),
             generation_id=lease.generation_id,
+            dynamic_catalog=lease.dynamic_catalog,
         )
         response = await handler.create(request_data, request_id=request_id)
     except ApplicationError as exc:
@@ -146,11 +148,16 @@ async def probe_responses(_auth=Depends(require_proxy_auth)):
 async def count_tokens(
     request: Request,
     request_data: TokenCountRequest,
+    services: ApiServices = Depends(get_services),
     settings: Settings = Depends(get_settings),
     _auth=Depends(require_proxy_auth),
 ):
     """Count tokens for a request."""
-    handler = TokenCountHandler(settings, token_counter=get_token_count)
+    handler = TokenCountHandler(
+        settings,
+        token_counter=get_token_count,
+        dynamic_catalog=services.requests.dynamic_catalog,
+    )
     return handler.count(request_data, request_id=get_request_id(request))
 
 

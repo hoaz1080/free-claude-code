@@ -26,7 +26,7 @@ from free_claude_code.core.anthropic.streaming import (
     parse_complete_tool_input,
     tool_schemas_by_name,
 )
-from free_claude_code.core.failures import ExecutionFailure
+from free_claude_code.core.failures import ExecutionFailure, FailureKind
 from free_claude_code.core.trace import provider_chat_body_snapshot, trace_event
 from free_claude_code.providers.base import BaseProvider, ProviderConfig
 from free_claude_code.providers.failure_policy import classify_provider_failure
@@ -34,6 +34,7 @@ from free_claude_code.providers.http import (
     close_provider_stream,
     maybe_await_aclose,
 )
+from free_claude_code.providers.key_pool import ApiKeyPool
 from free_claude_code.providers.model_listing import extract_openai_model_ids
 from free_claude_code.providers.rate_limit import ProviderRateLimiter
 from free_claude_code.providers.stream_recovery import (
@@ -77,36 +78,67 @@ class OpenAIChatProvider(BaseProvider):
         super().__init__(config)
         self._profile = profile
         self._provider_name = profile.provider_name
-        self._api_key = config.api_key
         self._base_url = profile.base_url(config.base_url).rstrip("/")
         # Learned per-model output-token caps from upstream 400 rejections, so
         # later requests clamp proactively instead of paying the 400 each time.
         self._model_output_caps: dict[str, int] = {}
         self._rate_limiter = rate_limiter
+        self._default_headers = default_headers
+        self._key_pool = ApiKeyPool(list(config.effective_api_keys()))
+        self._http_proxy = config.proxy
+        self._http_read_timeout = config.http_read_timeout
+        self._http_connect_timeout = config.http_connect_timeout
+        self._http_write_timeout = config.http_write_timeout
+        self._client = self._build_client()
+
+    def _build_client(self) -> AsyncOpenAI:
+        """Create an AsyncOpenAI client using the current API key from the pool."""
+        current_key = self._key_pool.current_key
         http_client = None
-        if config.proxy:
+        if self._http_proxy:
             http_client = httpx.AsyncClient(
-                proxy=config.proxy,
+                proxy=self._http_proxy,
                 timeout=httpx.Timeout(
-                    config.http_read_timeout,
-                    connect=config.http_connect_timeout,
-                    read=config.http_read_timeout,
-                    write=config.http_write_timeout,
+                    self._http_read_timeout,
+                    connect=self._http_connect_timeout,
+                    read=self._http_read_timeout,
+                    write=self._http_write_timeout,
                 ),
             )
-        self._client = AsyncOpenAI(
-            api_key=self._api_key,
+        return AsyncOpenAI(
+            api_key=current_key or "",
             base_url=self._base_url,
             max_retries=0,
-            default_headers=default_headers,
+            default_headers=self._default_headers,
             timeout=httpx.Timeout(
-                config.http_read_timeout,
-                connect=config.http_connect_timeout,
-                read=config.http_read_timeout,
-                write=config.http_write_timeout,
+                self._http_read_timeout,
+                connect=self._http_connect_timeout,
+                read=self._http_read_timeout,
+                write=self._http_write_timeout,
             ),
             http_client=http_client,
         )
+
+    def _rotate_key(self, reason: str) -> str | None:
+        """Rotate to the next available key and rebuild the client."""
+        next_key = self._key_pool.current_key  # _current_entry auto-scans
+        logger.info(
+            "{}: rotating API key (reason={}), pool_state={!r}",
+            self._provider_name,
+            reason,
+            self._key_pool,
+        )
+        self._client = self._build_client()
+        return next_key
+
+    def _on_key_failure(self, kind: FailureKind, _cooldown: float) -> None:
+        """Handle key failure before retry: mark and rotate."""
+        if kind == FailureKind.AUTHENTICATION:
+            self._key_pool.mark_auth_failed()
+        elif kind == FailureKind.RATE_LIMIT:
+            self._key_pool.mark_rate_limited(60.0)
+        if self._key_pool.has_available_key:
+            self._rotate_key(kind.value)
 
     async def cleanup(self) -> None:
         """Release HTTP client resources."""
@@ -178,9 +210,11 @@ class OpenAIChatProvider(BaseProvider):
                 stream = await self._rate_limiter.execute_with_retry(
                     self._client.chat.completions.create,
                     provider_failure_override=self._provider_failure_override,
+                    on_key_failure=self._on_key_failure,
                     **create_body,
                     stream=True,
                 )
+                self._key_pool.reset_cooldowns()
                 return stream, body
             except Exception as error:
                 retry_body = self._next_create_retry_body(error, body, used_retry_kinds)

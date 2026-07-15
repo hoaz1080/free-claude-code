@@ -7,8 +7,11 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any, TypeVar
 
+import httpx
+import openai
 from loguru import logger
 
+from free_claude_code.core.failures import ExecutionFailure, FailureKind
 from free_claude_code.core.rate_limit import StrictSlidingWindowLimiter
 from free_claude_code.core.trace import trace_event
 from free_claude_code.providers.failure_policy import (
@@ -16,6 +19,8 @@ from free_claude_code.providers.failure_policy import (
     retryable_upstream_status,
     retryable_upstream_transport_error,
 )
+
+KeyFailureCallback = Callable[[FailureKind, float], None]
 
 T = TypeVar("T")
 
@@ -139,6 +144,7 @@ class ProviderRateLimiter:
         base_delay: float = 2.0,
         max_delay: float = 60.0,
         jitter: float = 1.0,
+        on_key_failure: KeyFailureCallback | None = None,
         **kwargs: Any,
     ) -> Any:
         """Execute an async callable with rate limiting and retry on transient limits.
@@ -149,6 +155,11 @@ class ProviderRateLimiter:
         use the same attempt budget and backoff schedule without setting the
         reactive provider block.
 
+        When *on_key_failure* is provided, it is called before the retry delay
+        on authentication (401) and rate-limit (429) failures so the caller can
+        rotate to the next API key. Auth failures count toward the attempt budget
+        when a key-failure hook is installed (otherwise they are non-retryable).
+
         Args:
             fn: Async callable to execute.
             provider_failure_override: Optional provider-specific semantic
@@ -157,6 +168,8 @@ class ProviderRateLimiter:
             base_delay: Base delay in seconds for exponential backoff.
             max_delay: Maximum delay cap in seconds.
             jitter: Maximum random jitter in seconds added to each delay.
+            on_key_failure: Optional callback invoked with (FailureKind, cooldown_s)
+                before retrying on 401 or 429 so the caller can rotate keys.
 
         Returns:
             The result of the callable.
@@ -180,11 +193,50 @@ class ProviderRateLimiter:
                 )
                 if effective_error is None:
                     effective_error = e
+
+                # Check for key-failure hook: auth (401/403) and rate-limit (429)
+                key_failure_kind: FailureKind | None = None
+                if on_key_failure is not None:
+                    if isinstance(effective_error, ExecutionFailure):
+                        if effective_error.kind == FailureKind.AUTHENTICATION:
+                            key_failure_kind = FailureKind.AUTHENTICATION
+                    elif isinstance(
+                        e,
+                        (
+                            openai.AuthenticationError,
+                            httpx.HTTPStatusError,
+                        ),
+                    ):
+                        status = getattr(
+                            getattr(e, "response", None), "status_code", None
+                        ) or getattr(e, "status_code", None)
+                        if status in (401, 403):
+                            key_failure_kind = FailureKind.AUTHENTICATION
+
                 status = retryable_upstream_status(effective_error)
                 transport_error = status is None and retryable_upstream_transport_error(
                     effective_error
                 )
+
+                # Non-retryable — unless key-failure hook handles it
                 if status is None and not transport_error:
+                    if key_failure_kind is not None and on_key_failure is not None:
+                        on_key_failure(key_failure_kind, 0.0)
+                        last_exc = e
+                        if attempt < max_retries:
+                            delay = min(base_delay * (2**attempt), max_delay)
+                            delay += random.uniform(0, jitter)
+                            attempt_no = attempt + 1
+                            logger.warning(
+                                "Auth failure (401/403), key rotated, "
+                                "attempt {}/{}. Retrying in {:.1f}s...",
+                                attempt_no,
+                                total_attempts,
+                                delay,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        break
                     raise
 
                 if status is None:
@@ -195,6 +247,11 @@ class ProviderRateLimiter:
                         if status == 429
                         else f"Upstream server error ({status})"
                     )
+
+                # Notify key-failure hook on 429 so caller can rotate keys
+                if status == 429 and on_key_failure is not None:
+                    on_key_failure(FailureKind.RATE_LIMIT, 60.0)
+
                 last_exc = e
                 if attempt >= max_retries:
                     logger.warning(

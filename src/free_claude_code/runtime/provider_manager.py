@@ -11,6 +11,7 @@ from free_claude_code.application.model_metadata import (
     ProviderModelInfo,
     ProviderModelRefreshResult,
 )
+from free_claude_code.config.dynamic_catalog import DynamicProviderCatalog
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.trace import trace_event
 from free_claude_code.providers.base import BaseProvider
@@ -22,7 +23,7 @@ from free_claude_code.providers.runtime.discovery import (
 from free_claude_code.providers.runtime.model_cache import ProviderModelCache
 from free_claude_code.providers.runtime.validation import ConfiguredModelValidator
 
-ProviderRuntimeFactory = Callable[[Settings], ProviderRuntime]
+ProviderRuntimeFactory = Callable[..., ProviderRuntime]
 CommitConfig = Callable[[], None]
 
 
@@ -61,6 +62,11 @@ class ProviderGenerationLease:
     def settings(self) -> Settings:
         return self._generation.settings
 
+    @property
+    def dynamic_catalog(self):
+        """Return the merged static + custom provider catalog."""
+        return self._manager.dynamic_catalog
+
     def is_provider_cached(self, provider_id: str) -> bool:
         return self._generation.runtime.is_cached(provider_id)
 
@@ -92,8 +98,11 @@ class ProviderRuntimeManager:
         self._runtime_factory = runtime_factory
         self._replace_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
+        self._dynamic_catalog = DynamicProviderCatalog()
         self._model_cache = ProviderModelCache(
-            model_cache_provider_ids_for_settings(settings)
+            model_cache_provider_ids_for_settings(
+                settings, dynamic_catalog=self._dynamic_catalog
+            )
         )
         self._refresh_task: asyncio.Task[None] | None = None
         self._next_generation_id = 2
@@ -104,9 +113,14 @@ class ProviderRuntimeManager:
         self._current = _ProviderGeneration(
             generation_id=1,
             settings=settings,
-            runtime=runtime_factory(settings),
+            runtime=runtime_factory(settings, dynamic_catalog=self._dynamic_catalog),
         )
         self._trace_published(self._current, previous=None, reason="startup")
+
+    @property
+    def dynamic_catalog(self) -> DynamicProviderCatalog:
+        """Return the merged static + custom provider catalog."""
+        return self._dynamic_catalog
 
     @property
     def current_generation_id(self) -> int:
@@ -188,7 +202,9 @@ class ProviderRuntimeManager:
             candidate_id = self._next_generation_id
             candidate_runtime: ProviderRuntime | None = None
             try:
-                candidate_runtime = self._runtime_factory(settings)
+                candidate_runtime = self._runtime_factory(
+                    settings, dynamic_catalog=self._dynamic_catalog
+                )
                 commit()
             except Exception as exc:
                 trace_event(
@@ -206,6 +222,8 @@ class ProviderRuntimeManager:
 
             self._next_generation_id += 1
             assert candidate_runtime is not None
+            # Refresh the dynamic catalog to pick up any custom provider changes
+            self._dynamic_catalog.refresh()
             previous = self._current
             candidate = _ProviderGeneration(
                 generation_id=candidate_id,
@@ -214,7 +232,9 @@ class ProviderRuntimeManager:
             )
             self._current = candidate
             self._model_cache.set_available_providers(
-                model_cache_provider_ids_for_settings(settings)
+                model_cache_provider_ids_for_settings(
+                    settings, dynamic_catalog=self._dynamic_catalog
+                )
             )
             previous.retired = True
             self._retired[previous.generation_id] = previous
@@ -284,7 +304,10 @@ class ProviderRuntimeManager:
                 generation.runtime.resolve_provider,
                 self._model_cache,
             )
-            return await discovery.refresh_model_list_cache(only_missing=only_missing)
+            return await discovery.refresh_model_list_cache(
+                only_missing=only_missing,
+                dynamic_catalog=self._dynamic_catalog,
+            )
         finally:
             await self._release(generation)
 

@@ -724,3 +724,95 @@ textarea:focus-visible,
     text-align: left;
   }
 }
+
+/* ─── Custom Providers ─────────────────────────────────────── */
+
+.custom-provider-form {
+  margin-bottom: 16px;
+  padding: 16px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.custom-provider-form .form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.custom-provider-form .form-row:has(textarea) {
+  grid-template-columns: 1fr;
+}
+
+.custom-provider-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-subtle);
+}
+
+.custom-provider-form input,
+.custom-provider-form textarea {
+  padding: 8px 10px;
+  background: var(--input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.custom-provider-form .form-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.custom-provider-form .form-actions .primary-button {
+  background: var(--accent);
+  color: white;
+  border: none;
+  padding: 8px 20px;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.custom-provider-form .form-actions .secondary-button {
+  background: var(--panel-strong);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 8px 20px;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.delete-button {
+  background: transparent !important;
+  border: 1px solid #a33 !important;
+  color: #e55 !important;
+}
+
+.delete-button:hover {
+  background: #a33 !important;
+  color: white !important;
+}
+
+.hint {
+  font-size: 13px;
+  color: var(--text-subtle);
+  padding: 12px 0;
+}
+
+@media (max-width: 640px) {
+  .custom-provider-form .form-row {
+    grid-template-columns: 1fr;
+  }
+}

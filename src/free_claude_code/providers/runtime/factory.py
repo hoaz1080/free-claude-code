@@ -3,10 +3,13 @@
 from collections.abc import Callable
 
 from free_claude_code.application.errors import UnknownProviderError
+from free_claude_code.config.custom_providers import CustomProviderDefinition
+from free_claude_code.config.dynamic_catalog import DynamicProviderCatalog
 from free_claude_code.config.provider_catalog import PROVIDER_CATALOG
 from free_claude_code.config.settings import Settings
 from free_claude_code.providers.base import BaseProvider, ProviderConfig
 from free_claude_code.providers.openai_chat import (
+    GENERIC_OPENAI_PROFILE_ID,
     OPENAI_CHAT_PROFILES,
     create_openai_chat_provider,
 )
@@ -118,31 +121,91 @@ _SPECIAL_PROVIDER_FACTORIES: dict[str, ProviderFactory] = {
     "github_models": _create_github_models,
 }
 
+# Verify every static catalog entry has exactly one construction owner.
+_static_ids = set(PROVIDER_CATALOG)
 _profiled_ids = set(OPENAI_CHAT_PROFILES)
 _special_ids = set(_SPECIAL_PROVIDER_FACTORIES)
-if _profiled_ids & _special_ids or _profiled_ids | _special_ids != set(
-    PROVIDER_CATALOG
-):
+_covered_static = _profiled_ids | _special_ids
+if _profiled_ids & _special_ids:
     raise AssertionError(
-        "Every provider must have exactly one construction owner: "
-        f"profiles={_profiled_ids!r} special={_special_ids!r} "
-        f"catalog={set(PROVIDER_CATALOG)!r}"
+        "Profiled and special provider IDs must not overlap: "
+        f"overlap={_profiled_ids & _special_ids!r}"
+    )
+_missing = _static_ids - _covered_static
+if _missing:
+    raise AssertionError(
+        f"Every static provider must have a construction owner: missing={_missing!r}"
     )
 
 
-def create_provider(provider_id: str, settings: Settings) -> BaseProvider:
-    """Create a provider instance for a supported provider id."""
+def _select_profile_id(
+    provider_id: str,
+    custom_def: CustomProviderDefinition | None,
+    is_custom: bool,
+) -> str:
+    """Choose the appropriate OpenAI profile id for a provider.
+
+    For static providers, the ``provider_id`` is the profile key.
+    For custom providers, the ``detected_profile`` is used if known;
+    otherwise the generic fallback.
+    """
+    if not is_custom:
+        return provider_id
+    if custom_def is not None and custom_def.detected_profile:
+        detected = custom_def.detected_profile
+        if detected in OPENAI_CHAT_PROFILES and detected != GENERIC_OPENAI_PROFILE_ID:
+            return detected
+    return GENERIC_OPENAI_PROFILE_ID
+
+
+def create_provider(
+    provider_id: str,
+    settings: Settings,
+    *,
+    dynamic_catalog: DynamicProviderCatalog | None = None,
+) -> BaseProvider:
+    """Create a provider instance for a static or custom provider id.
+
+    When *dynamic_catalog* is provided, custom providers are resolved
+    from it. Custom providers use their ``detected_profile`` (or generic
+    fallback) to select the appropriate ``OpenAIChatProfile``.
+    """
+    # Check static catalog first, then dynamic
     descriptor = PROVIDER_CATALOG.get(provider_id)
+    is_custom = False
+    custom_def: CustomProviderDefinition | None = None
+    custom_api_keys: tuple[str, ...] | None = None
+
+    if descriptor is None and dynamic_catalog is not None:
+        custom_def = dynamic_catalog.get_custom_definition(provider_id)
+        if custom_def is not None:
+            descriptor = custom_def.to_descriptor()
+            is_custom = True
+            custom_api_keys = custom_def.api_keys
+
     if descriptor is None:
+        if dynamic_catalog is not None:
+            raise UnknownProviderError.for_provider(
+                provider_id, dynamic_catalog.all_provider_ids
+            )
         raise UnknownProviderError.for_provider(provider_id, PROVIDER_CATALOG)
 
-    config = build_provider_config(descriptor, settings)
+    config = build_provider_config(
+        descriptor,
+        settings,
+        custom_api_keys=custom_api_keys,
+    )
     rate_limiter = ProviderRateLimiter(
         rate_limit=config.rate_limit or 40,
         rate_window=config.rate_window or 60.0,
         max_concurrency=config.max_concurrency,
     )
-    factory = _SPECIAL_PROVIDER_FACTORIES.get(provider_id)
-    if factory is not None:
-        return factory(config, settings, rate_limiter)
-    return create_openai_chat_provider(provider_id, config, rate_limiter)
+
+    # Custom providers never use special factories — only OpenAI profiles
+    if not is_custom:
+        factory = _SPECIAL_PROVIDER_FACTORIES.get(provider_id)
+        if factory is not None:
+            return factory(config, settings, rate_limiter)
+
+    profile_id = _select_profile_id(provider_id, custom_def, is_custom)
+    return create_openai_chat_provider(profile_id, config, rate_limiter)

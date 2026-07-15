@@ -23,10 +23,14 @@ class ProviderConfig:
 
     Base fields apply to all providers. Provider-specific parameters
     (e.g. NIM temperature, top_p) are passed by the provider constructor.
+
+    ``api_keys`` is the canonical multi-key pool. When empty, ``api_key``
+    is used as a single-key fallback so existing callers work unchanged.
     """
 
     api_key: str
     base_url: str
+    api_keys: tuple[str, ...] = ()
     rate_limit: int | None = None
     rate_window: int = 60
     max_concurrency: int = 5
@@ -38,12 +42,23 @@ class ProviderConfig:
     log_raw_sse_events: bool = False
     log_api_error_tracebacks: bool = False
 
+    def effective_api_keys(self) -> tuple[str, ...]:
+        """Return the full key list, falling back to ``api_key`` when pool is empty."""
+        if self.api_keys:
+            return self.api_keys
+        return (self.api_key,) if self.api_key.strip() else ()
+
 
 class BaseProvider(ABC):
     """Base class for all providers. Extend this to add your own."""
 
     def __init__(self, config: ProviderConfig):
         self._config = config
+
+    @property
+    def _api_key(self) -> str:
+        """Return the current effective API key for backward compatibility."""
+        return self._config.api_key
 
     def _is_thinking_enabled(
         self, request: MessagesRequest, thinking_enabled: bool | None = None

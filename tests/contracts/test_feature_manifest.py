@@ -99,9 +99,12 @@ def test_provider_and_platform_registries_include_advertised_builtins() -> None:
         "github_models": GitHubModelsProvider,
         "gemini": GeminiProvider,
     }
-    assert set(OPENAI_CHAT_PROFILES).isdisjoint(specialized_provider_classes)
+    # generic_openai is a fallback profile for unknown custom providers,
+    # not a catalog entry.
+    profiled_builtins = set(OPENAI_CHAT_PROFILES) - {"generic_openai"}
+    assert profiled_builtins.isdisjoint(specialized_provider_classes)
     assert set(PROVIDER_CATALOG) == (
-        set(OPENAI_CHAT_PROFILES) | set(specialized_provider_classes)
+        profiled_builtins | set(specialized_provider_classes)
     )
     assert issubclass(OpenAIChatProvider, BaseProvider)
     for provider_class in specialized_provider_classes.values():

@@ -35,6 +35,30 @@
               </div>
               <div id="providerGrid" class="provider-grid"></div>
             </section>
+            <section class="provider-strip custom-providers-section" aria-label="Custom providers">
+              <div class="strip-header">
+                <h3>Custom Providers</h3>
+                <button id="addCustomProviderButton" class="test-button" type="button">+ Add</button>
+              </div>
+              <div id="customProviderForm" class="custom-provider-form" hidden>
+                <div class="form-row">
+                  <label>Display Name <input id="cpDisplayName" type="text" placeholder="My Provider" /></label>
+                  <label>Base URL <input id="cpBaseUrl" type="url" placeholder="https://api.example.com/v1" required /></label>
+                </div>
+                <div class="form-row">
+                  <label>API Keys <textarea id="cpApiKeys" rows="3" placeholder="key1, key2, key3&#10;One per line or comma-separated" required></textarea></label>
+                </div>
+                <div class="form-row">
+                  <label>Override ID (optional) <input id="cpProviderId" type="text" placeholder="auto-detected" /></label>
+                </div>
+                <div class="form-actions">
+                  <button id="cpSaveButton" class="primary-button" type="button">Save</button>
+                  <button id="cpCancelButton" class="secondary-button" type="button">Cancel</button>
+                </div>
+                <div id="cpFormMessage" class="message-area"></div>
+              </div>
+              <div id="customProviderGrid" class="provider-grid"></div>
+            </section>
             <div
               id="providersSections"
               class="form-sections"

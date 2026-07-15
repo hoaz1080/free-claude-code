@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from loguru import logger
 
 from free_claude_code.application.errors import UnknownProviderError
+from free_claude_code.config.dynamic_catalog import DynamicProviderCatalog
 from free_claude_code.config.model_refs import parse_model_name, parse_provider_type
 from free_claude_code.config.provider_catalog import (
     PROVIDER_CATALOG,
@@ -39,8 +40,20 @@ class RoutedTokenCountRequest:
 class ModelRouter:
     """Resolve incoming Claude model names to configured provider/model pairs."""
 
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        dynamic_catalog: DynamicProviderCatalog | None = None,
+    ):
         self._settings = settings
+        self._dynamic_catalog = dynamic_catalog
+
+    @property
+    def _effective_provider_ids(self) -> tuple[str, ...]:
+        if self._dynamic_catalog is not None:
+            return self._dynamic_catalog.all_provider_ids
+        return SUPPORTED_PROVIDER_IDS
 
     def resolve(self, claude_model_name: str) -> ResolvedModel:
         (
@@ -86,17 +99,24 @@ class ModelRouter:
             thinking_enabled=thinking_enabled,
         )
 
-    @staticmethod
-    def _validate_provider_id(provider_id: str) -> None:
-        if provider_id not in PROVIDER_CATALOG:
-            raise UnknownProviderError.for_provider(provider_id, PROVIDER_CATALOG)
+    def _validate_provider_id(self, provider_id: str) -> None:
+        if provider_id in PROVIDER_CATALOG:
+            return
+        if (
+            self._dynamic_catalog is not None
+            and self._dynamic_catalog.resolve(provider_id) is not None
+        ):
+            return
+        raise UnknownProviderError.for_provider(
+            provider_id, self._effective_provider_ids
+        )
 
     def _direct_provider_model(
         self, model_name: str
     ) -> tuple[str | None, str | None, bool | None]:
         decoded = decode_gateway_model_id(model_name)
         if decoded is not None:
-            if decoded.provider_id not in SUPPORTED_PROVIDER_IDS:
+            if decoded.provider_id not in self._effective_provider_ids:
                 return None, None, None
             return (
                 decoded.provider_id,
@@ -107,7 +127,7 @@ class ModelRouter:
         provider_id, separator, provider_model = model_name.partition("/")
         if not separator:
             return None, None, None
-        if provider_id not in SUPPORTED_PROVIDER_IDS:
+        if provider_id not in self._effective_provider_ids:
             return None, None, None
         if not provider_model:
             return None, None, None

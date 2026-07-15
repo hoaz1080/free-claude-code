@@ -14,8 +14,9 @@ from free_claude_code.runtime.provider_manager import ProviderRuntimeManager
 
 
 class FakeRuntime(ProviderRuntime):
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, dynamic_catalog=None) -> None:
         self.settings = settings
+        self._dynamic_catalog = dynamic_catalog
         self.cleanup_calls = 0
         self.cleanup_error: Exception | None = None
         self.cleanup_started: asyncio.Event | None = None
@@ -44,10 +45,10 @@ class RuntimeFactory:
         self.runtimes: list[FakeRuntime] = []
         self.error: Exception | None = None
 
-    def __call__(self, settings: Settings) -> ProviderRuntime:
+    def __call__(self, settings: Settings, *, dynamic_catalog=None) -> ProviderRuntime:
         if self.error is not None:
             raise self.error
-        runtime = FakeRuntime(settings)
+        runtime = FakeRuntime(settings, dynamic_catalog=dynamic_catalog)
         self.runtimes.append(runtime)
         return runtime
 

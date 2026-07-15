@@ -17,6 +17,7 @@ from free_claude_code.application.errors import ApplicationError, InvalidRequest
 from free_claude_code.application.execution import ProviderExecutor
 from free_claude_code.application.ports import ProviderResolver
 from free_claude_code.application.routing import ModelRouter
+from free_claude_code.config.dynamic_catalog import DynamicProviderCatalog
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.anthropic import MessagesRequest
 from free_claude_code.core.diagnostics import safe_exception_message
@@ -41,9 +42,12 @@ class ResponsesHandler:
         responses_adapter: OpenAIResponsesAdapter | None = None,
         provider_executor: ProviderExecutor | None = None,
         generation_id: int | None = None,
+        dynamic_catalog: DynamicProviderCatalog | None = None,
     ) -> None:
         self._settings = settings
-        self._model_router = model_router or ModelRouter(settings)
+        self._model_router = model_router or ModelRouter(
+            settings, dynamic_catalog=dynamic_catalog
+        )
         self._responses_adapter = responses_adapter or OpenAIResponsesAdapter()
         self._provider_executor = provider_executor or ProviderExecutor(
             provider_resolver,

@@ -35,6 +35,7 @@ from free_claude_code.application.errors import ApplicationError, InvalidRequest
 from free_claude_code.application.execution import ProviderExecutor, TokenCounter
 from free_claude_code.application.ports import ProviderResolver
 from free_claude_code.application.routing import ModelRouter, RoutedMessagesRequest
+from free_claude_code.config.dynamic_catalog import DynamicProviderCatalog
 from free_claude_code.config.settings import Settings
 from free_claude_code.core.anthropic import (
     MessagesRequest,
@@ -76,9 +77,12 @@ class MessagesHandler:
         token_counter: TokenCounter = get_token_count,
         provider_executor: ProviderExecutor | None = None,
         generation_id: int | None = None,
+        dynamic_catalog: DynamicProviderCatalog | None = None,
     ) -> None:
         self._settings = settings
-        self._model_router = model_router or ModelRouter(settings)
+        self._model_router = model_router or ModelRouter(
+            settings, dynamic_catalog=dynamic_catalog
+        )
         self._token_counter = token_counter
         self._provider_executor = provider_executor or ProviderExecutor(
             provider_resolver,

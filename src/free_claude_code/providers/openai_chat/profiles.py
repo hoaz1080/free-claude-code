@@ -123,7 +123,21 @@ def _apply_zai_thinking_policy(
     )
 
 
+# Fallback profile for unknown/custom provider hosts. Conservative defaults:
+# extra_body forwarded, base_url auto-normalized, standard max_tokens field,
+# reasoning_content delta (most common), no quirky postprocessors.
+GENERIC_OPENAI_PROFILE_ID = "generic_openai"
+GENERIC_OPENAI_PROFILE = OpenAIChatProfile(
+    OpenAIChatRequestPolicy(
+        provider_name="GENERIC_OPENAI",
+        include_extra_body=True,
+        default_max_tokens=ANTHROPIC_DEFAULT_MAX_OUTPUT_TOKENS,
+    ),
+    normalize_base_url=True,
+)
+
 OPENAI_CHAT_PROFILES: dict[str, OpenAIChatProfile] = {
+    GENERIC_OPENAI_PROFILE_ID: GENERIC_OPENAI_PROFILE,
     "mistral_codestral": OpenAIChatProfile(
         OpenAIChatRequestPolicy(provider_name="CODESTRAL")
     ),

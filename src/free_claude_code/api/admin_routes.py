@@ -14,6 +14,15 @@ from free_claude_code.application.model_metadata import ProviderModelRefreshResu
 from free_claude_code.config.admin.manifest import FIELD_BY_KEY
 from free_claude_code.config.admin.persistence import validate_updates
 from free_claude_code.config.admin.values import load_config_response
+from free_claude_code.config.custom_providers import (
+    CustomProviderDefinition,
+    load_custom_providers_from_managed_env,
+    save_custom_providers_to_managed_env,
+)
+from free_claude_code.config.detection import (
+    detect_provider_profile,
+    generate_provider_id,
+)
 from free_claude_code.config.model_refs import configured_chat_model_refs
 
 from .dependencies import get_services
@@ -183,6 +192,106 @@ def _model_options(
         "models": sorted(configured | discovered, key=str.casefold),
         "failed_providers": list(failed_provider_ids),
     }
+
+
+class CustomProviderPayload(BaseModel):
+    """Custom provider definition submitted by the admin UI."""
+
+    base_url: str = Field(min_length=1)
+    api_keys: list[str] = Field(min_length=1)
+    display_name: str = Field(default="")
+    provider_id: str = Field(default="")
+
+
+def _custom_provider_status(defn: CustomProviderDefinition) -> dict[str, Any]:
+    return {
+        "provider_id": defn.provider_id,
+        "display_name": defn.display_name,
+        "base_url": defn.base_url,
+        "detected_profile": defn.detected_profile,
+        "api_key_count": len(defn.api_keys),
+        "kind": "custom",
+        "status": "configured",
+        "label": f"Custom ({defn.detected_profile or 'generic'})",
+    }
+
+
+@router.get("/admin/api/custom-providers")
+async def list_custom_providers(request: Request):
+    require_loopback_admin(request)
+    definitions = load_custom_providers_from_managed_env()
+    return {
+        "providers": [_custom_provider_status(defn) for defn in definitions.values()]
+    }
+
+
+@router.post("/admin/api/custom-providers")
+async def add_custom_provider(
+    payload: CustomProviderPayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    services: ApiServices = Depends(get_services),
+):
+    require_loopback_admin(request)
+    definitions = load_custom_providers_from_managed_env()
+
+    # Auto-detect or use provided provider_id
+    provider_id = payload.provider_id.strip() or generate_provider_id(payload.base_url)
+    if provider_id in definitions:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Custom provider '{provider_id}' already exists",
+        )
+
+    display_name = payload.display_name.strip() or provider_id.replace("_", " ").title()
+    detected_profile = detect_provider_profile(payload.base_url)
+    api_keys = tuple(k.strip() for k in payload.api_keys if k.strip())
+    if not api_keys:
+        raise HTTPException(status_code=400, detail="At least one API key is required")
+
+    definition = CustomProviderDefinition(
+        provider_id=provider_id,
+        display_name=display_name,
+        base_url=payload.base_url.strip().rstrip("/"),
+        api_keys=api_keys,
+        detected_profile=detected_profile,
+    )
+    definitions[provider_id] = definition
+    save_custom_providers_to_managed_env(definitions)
+
+    # Trigger provider generation refresh so the new provider takes effect
+    await services.admin.refresh_catalog()
+    background_tasks.add_task(services.admin.request_restart)
+
+    return {
+        "ok": True,
+        "provider": _custom_provider_status(definition),
+    }
+
+
+@router.delete("/admin/api/custom-providers/{provider_id}")
+async def delete_custom_provider(
+    provider_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    services: ApiServices = Depends(get_services),
+):
+    require_loopback_admin(request)
+    definitions = load_custom_providers_from_managed_env()
+    if provider_id not in definitions:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Custom provider '{provider_id}' not found",
+        )
+
+    del definitions[provider_id]
+    save_custom_providers_to_managed_env(definitions)
+
+    # Trigger provider generation refresh
+    await services.admin.refresh_catalog()
+    background_tasks.add_task(services.admin.request_restart)
+
+    return {"ok": True, "provider_id": provider_id}
 
 
 def _filtered_values(values: dict[str, Any]) -> dict[str, Any]:

@@ -556,6 +556,140 @@ function showMessage(message, kind = "") {
   area.className = `message-area ${kind}`.trim();
 }
 
+// ─── Custom Providers ────────────────────────────────────────────
+
+const cpFormMessage = (msg, kind = "") => {
+  const area = byId("cpFormMessage");
+  area.textContent = msg;
+  area.className = `message-area ${kind}`.trim();
+};
+
+function showCustomProviderForm(visible) {
+  byId("addCustomProviderButton").hidden = visible;
+  byId("customProviderForm").hidden = !visible;
+  if (!visible) {
+    byId("cpDisplayName").value = "";
+    byId("cpBaseUrl").value = "";
+    byId("cpApiKeys").value = "";
+    byId("cpProviderId").value = "";
+    cpFormMessage("");
+  }
+}
+
+function parseApiKeys(raw) {
+  if (!raw.trim()) return [];
+  return raw
+    .split(/[,\n]/)
+    .map((k) => k.trim())
+    .filter(Boolean);
+}
+
+async function saveCustomProvider() {
+  const baseUrl = byId("cpBaseUrl").value.trim();
+  if (!baseUrl) {
+    cpFormMessage("Base URL is required", "error");
+    return;
+  }
+  const rawKeys = byId("cpApiKeys").value;
+  const apiKeys = parseApiKeys(rawKeys);
+  if (!apiKeys.length) {
+    cpFormMessage("At least one API key is required", "error");
+    return;
+  }
+  const displayName = byId("cpDisplayName").value.trim();
+  const providerId = byId("cpProviderId").value.trim();
+  const saveButton = byId("cpSaveButton");
+  saveButton.disabled = true;
+  saveButton.textContent = "Saving...";
+  try {
+    const result = await api("/admin/api/custom-providers", {
+      method: "POST",
+      body: JSON.stringify({ base_url: baseUrl, api_keys: apiKeys, display_name: displayName, provider_id: providerId }),
+    });
+    showCustomProviderForm(false);
+    await loadCustomProviders();
+    showMessage(`Provider "${result.provider.display_name}" added`, "ok");
+  } catch (error) {
+    cpFormMessage(error.message, "error");
+  } finally {
+    saveButton.disabled = false;
+    saveButton.textContent = "Save";
+  }
+}
+
+async function deleteCustomProvider(providerId, button) {
+  if (!confirm(`Delete custom provider "${providerId}"?`)) return;
+  button.disabled = true;
+  try {
+    await api(`/admin/api/custom-providers/${encodeURIComponent(providerId)}`, {
+      method: "DELETE",
+    });
+    await loadCustomProviders();
+    showMessage(`Provider "${providerId}" removed`, "ok");
+  } catch (error) {
+    showMessage(error.message, "error");
+    button.disabled = false;
+  }
+}
+
+function renderCustomProviders(providers) {
+  const grid = byId("customProviderGrid");
+  grid.innerHTML = "";
+  if (!providers.length) {
+    grid.innerHTML =
+      '<p class="hint">No custom providers. Click "+ Add" to add an OpenAI-compatible endpoint with your own API keys.</p>';
+    return;
+  }
+  providers.forEach((provider) => {
+    const card = document.createElement("article");
+    card.className = "provider-card custom-provider-card";
+
+    const title = document.createElement("div");
+    title.className = "provider-title";
+    title.innerHTML = `<strong>${provider.display_name}</strong>`;
+
+    const pill = document.createElement("span");
+    pill.className = `status-pill ${statusClass(provider.status)}`;
+    pill.textContent = provider.label;
+    title.appendChild(pill);
+
+    const meta = document.createElement("div");
+    meta.className = "provider-meta";
+    meta.innerHTML = `${provider.base_url} · ${provider.api_key_count} key${provider.api_key_count !== 1 ? "s" : ""}`;
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "test-button delete-button";
+    deleteButton.textContent = "Delete";
+    deleteButton.addEventListener("click", () =>
+      deleteCustomProvider(provider.provider_id, deleteButton),
+    );
+
+    card.append(title, meta, deleteButton);
+    grid.appendChild(card);
+  });
+}
+
+async function loadCustomProviders() {
+  try {
+    const result = await api("/admin/api/custom-providers");
+    renderCustomProviders(result.providers);
+  } catch (error) {
+    // Silently fail — custom providers section is secondary
+  }
+}
+
+byId("addCustomProviderButton").addEventListener("click", () =>
+  showCustomProviderForm(true),
+);
+byId("cpCancelButton").addEventListener("click", () =>
+  showCustomProviderForm(false),
+);
+byId("cpSaveButton").addEventListener("click", saveCustomProvider);
+
+// ─── Init ────────────────────────────────────────────────────────
+loadCustomProviders();
+
 byId("validateButton").addEventListener("click", () => validate(true));
 byId("applyButton").addEventListener("click", apply);
 

@@ -248,6 +248,14 @@ class ApplicationRuntime:
     async def refresh_models(self) -> ProviderModelRefreshResult:
         return await self.provider_manager.refresh_model_list_cache()
 
+    async def refresh_catalog(self) -> None:
+        """Refresh the dynamic catalog without changing settings."""
+        await self.provider_manager.replace(
+            self.settings,
+            commit=lambda: None,
+            reason="custom_provider_change",
+        )
+
     async def request_restart(self) -> None:
         callback = self._restart_callback
         if callback is None:

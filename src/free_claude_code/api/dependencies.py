@@ -33,10 +33,14 @@ def resolve_provider(
     try:
         provider = lease.resolve_provider(provider_type)
     except UnknownProviderError:
+        supported_ids = set(PROVIDER_CATALOG)
+        dynamic_catalog = getattr(lease, "dynamic_catalog", None)
+        if dynamic_catalog is not None:
+            supported_ids |= set(dynamic_catalog.all_provider_ids)
         logger.error(
             "Unknown provider_type: '{}'. Supported: {}",
             provider_type,
-            ", ".join(f"'{key}'" for key in PROVIDER_CATALOG),
+            ", ".join(f"'{key}'" for key in sorted(supported_ids)),
         )
         raise
     if should_log_init:

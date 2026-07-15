@@ -9,6 +9,7 @@ from free_claude_code.application.model_metadata import (
     ProviderModelInfo,
     ProviderModelRefreshResult,
 )
+from free_claude_code.config.dynamic_catalog import DynamicProviderCatalog
 from free_claude_code.config.model_refs import configured_chat_model_refs
 from free_claude_code.config.provider_catalog import PROVIDER_CATALOG
 from free_claude_code.config.settings import Settings
@@ -26,9 +27,17 @@ def referenced_provider_ids(settings: Settings) -> frozenset[str]:
     return frozenset(ref.provider_id for ref in configured_chat_model_refs(settings))
 
 
-def model_cache_provider_ids_for_settings(settings: Settings) -> tuple[str, ...]:
-    """Return providers whose model metadata is valid for these settings."""
-    return tuple(
+def model_cache_provider_ids_for_settings(
+    settings: Settings,
+    *,
+    dynamic_catalog: DynamicProviderCatalog | None = None,
+) -> tuple[str, ...]:
+    """Return providers whose model metadata is valid for these settings.
+
+    Includes both static entries (with credentials) and custom providers
+    from the dynamic catalog.
+    """
+    static_ids = tuple(
         provider_id
         for provider_id, descriptor in PROVIDER_CATALOG.items()
         if descriptor.local
@@ -37,16 +46,33 @@ def model_cache_provider_ids_for_settings(settings: Settings) -> tuple[str, ...]
             and provider_credential(descriptor, settings).strip()
         )
     )
+    if dynamic_catalog is not None:
+        return (*static_ids, *dynamic_catalog.custom_provider_ids)
+    return static_ids
 
 
-def model_list_provider_ids_for_settings(settings: Settings) -> tuple[str, ...]:
+def model_list_provider_ids_for_settings(
+    settings: Settings,
+    *,
+    dynamic_catalog: DynamicProviderCatalog | None = None,
+) -> tuple[str, ...]:
     """Return providers worth discovering for this process configuration."""
     referenced_ids = referenced_provider_ids(settings)
-    return tuple(
-        provider_id
-        for provider_id in model_cache_provider_ids_for_settings(settings)
-        if not PROVIDER_CATALOG[provider_id].local or provider_id in referenced_ids
+    cache_ids = list(
+        model_cache_provider_ids_for_settings(settings, dynamic_catalog=dynamic_catalog)
     )
+    result: list[str] = []
+    for provider_id in cache_ids:
+        # Static local providers: only if referenced
+        static_descriptor = PROVIDER_CATALOG.get(provider_id)
+        if (
+            static_descriptor is not None
+            and static_descriptor.local
+            and provider_id not in referenced_ids
+        ):
+            continue
+        result.append(provider_id)
+    return tuple(result)
 
 
 class ProviderModelDiscovery:
@@ -63,10 +89,15 @@ class ProviderModelDiscovery:
         self._model_cache = model_cache
 
     async def refresh_model_list_cache(
-        self, *, only_missing: bool = False
+        self,
+        *,
+        only_missing: bool = False,
+        dynamic_catalog: DynamicProviderCatalog | None = None,
     ) -> ProviderModelRefreshResult:
         """Best-effort refresh of model lists for usable providers."""
-        provider_ids = model_list_provider_ids_for_settings(self._settings)
+        provider_ids = model_list_provider_ids_for_settings(
+            self._settings, dynamic_catalog=dynamic_catalog
+        )
         if only_missing:
             provider_ids = tuple(
                 provider_id
