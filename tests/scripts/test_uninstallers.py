@@ -500,10 +500,10 @@ def test_readme_uninstall_uses_raw_urls_and_verification_contract() -> None:
 
     assert (
         'curl -fsSL "https://raw.githubusercontent.com/'
-        'Alishahryar1/free-claude-code/main/scripts/uninstall.sh" | sh'
+        'hoaz1080/free-claude-code/main/scripts/uninstall.sh" | sh'
     ) in text
     assert (
         '& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/'
-        'Alishahryar1/free-claude-code/main/scripts/uninstall.ps1")))'
+        'hoaz1080/free-claude-code/main/scripts/uninstall.ps1")))'
     ) in text
     assert "verifies every FCC command is gone" in text

@@ -13,6 +13,7 @@ from free_claude_code.config.provider_catalog import (
     DEEPSEEK_DEFAULT_BASE,
     NVIDIA_NIM_DEFAULT_BASE,
     OPENROUTER_DEFAULT_BASE,
+    SUPPORTED_PROVIDER_IDS,
     WAFER_DEFAULT_BASE,
 )
 from free_claude_code.config.settings import Settings
@@ -565,3 +566,22 @@ def test_runtime_cached_prefixed_model_refs_are_deterministic() -> None:
         "open_router/z-model",
         "deepseek/deepseek-chat",
     )
+
+
+def test_runtime_cache_exposes_custom_provider_models() -> None:
+    """Custom (non-static) provider ids must surface in prefixed model infos."""
+    custom_id = "custom_api_example_com"
+    cache = ProviderModelCache(
+        available_provider_ids=(*SUPPORTED_PROVIDER_IDS, custom_id)
+    )
+    cache.cache_model_ids(custom_id, {"gpt-test", "alpha-model"})
+
+    refs = cache.cached_prefixed_model_refs()
+    # Custom provider models appear after static providers, sorted by model id
+    assert refs == (
+        f"{custom_id}/alpha-model",
+        f"{custom_id}/gpt-test",
+    )
+    # Stays scoped after a replace that retains the custom provider
+    cache.set_available_providers((*SUPPORTED_PROVIDER_IDS, custom_id))
+    assert f"{custom_id}/alpha-model" in cache.cached_prefixed_model_refs()

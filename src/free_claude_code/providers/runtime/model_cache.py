@@ -61,6 +61,19 @@ class ProviderModelCache:
             return None
         return info.supports_thinking
 
+    def _ordered_available_ids(self) -> tuple[str, ...]:
+        """Return available provider ids in deterministic output order.
+
+        Static providers keep their catalog order; custom (non-static)
+        providers follow, sorted alphabetically for stable diffs.
+        """
+        available = set(self._available_provider_ids)
+        static = tuple(pid for pid in SUPPORTED_PROVIDER_IDS if pid in available)
+        custom = tuple(
+            sorted(pid for pid in available if pid not in SUPPORTED_PROVIDER_IDS)
+        )
+        return (*static, *custom)
+
     def cached_prefixed_model_refs(self) -> tuple[str, ...]:
         """Return cached provider models in user-selectable ``provider/model`` form."""
         return tuple(info.model_id for info in self.cached_prefixed_model_infos())
@@ -68,7 +81,7 @@ class ProviderModelCache:
     def cached_prefixed_model_infos(self) -> tuple[ProviderModelInfo, ...]:
         """Return cached provider models with user-selectable prefixed ids."""
         infos: list[ProviderModelInfo] = []
-        for provider_id in SUPPORTED_PROVIDER_IDS:
+        for provider_id in self._ordered_available_ids():
             provider_infos = self._model_infos_by_provider.get(provider_id, {})
             infos.extend(
                 ProviderModelInfo(
