@@ -199,6 +199,7 @@ class CustomProviderPayload(BaseModel):
 
     base_url: str = Field(min_length=1)
     api_keys: list[str] = Field(min_length=1)
+    proxies: list[str] = Field(default_factory=list)
     display_name: str = Field(default="")
     provider_id: str = Field(default="")
 
@@ -210,6 +211,7 @@ def _custom_provider_status(defn: CustomProviderDefinition) -> dict[str, Any]:
         "base_url": defn.base_url,
         "detected_profile": defn.detected_profile,
         "api_key_count": len(defn.api_keys),
+        "proxy_count": sum(1 for p in defn.proxies if p),
         "kind": "custom",
         "status": "configured",
         "label": f"Custom ({defn.detected_profile or 'generic'})",
@@ -222,6 +224,30 @@ async def list_custom_providers(request: Request):
     definitions = load_custom_providers_from_managed_env()
     return {
         "providers": [_custom_provider_status(defn) for defn in definitions.values()]
+    }
+
+
+@router.get("/admin/api/custom-providers/{provider_id}")
+async def get_custom_provider(
+    provider_id: str,
+    request: Request,
+):
+    """Return full details for one custom provider (for edit form prefill)."""
+    require_loopback_admin(request)
+    definitions = load_custom_providers_from_managed_env()
+    defn = definitions.get(provider_id)
+    if defn is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Custom provider '{provider_id}' not found",
+        )
+    return {
+        "provider_id": defn.provider_id,
+        "display_name": defn.display_name,
+        "base_url": defn.base_url,
+        "api_keys": list(defn.api_keys),
+        "proxies": list(defn.proxies),
+        "detected_profile": defn.detected_profile,
     }
 
 
@@ -248,12 +274,14 @@ async def add_custom_provider(
     api_keys = tuple(k.strip() for k in payload.api_keys if k.strip())
     if not api_keys:
         raise HTTPException(status_code=400, detail="At least one API key is required")
+    proxies = tuple(p.strip() for p in payload.proxies if p.strip())
 
     definition = CustomProviderDefinition(
         provider_id=provider_id,
         display_name=display_name,
         base_url=payload.base_url.strip().rstrip("/"),
         api_keys=api_keys,
+        proxies=proxies,
         detected_profile=detected_profile,
     )
     definitions[provider_id] = definition
@@ -292,6 +320,58 @@ async def delete_custom_provider(
     background_tasks.add_task(services.admin.request_restart)
 
     return {"ok": True, "provider_id": provider_id}
+
+
+@router.put("/admin/api/custom-providers/{provider_id}")
+async def edit_custom_provider(
+    provider_id: str,
+    payload: CustomProviderPayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    services: ApiServices = Depends(get_services),
+):
+    require_loopback_admin(request)
+    definitions = load_custom_providers_from_managed_env()
+    if provider_id not in definitions:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Custom provider '{provider_id}' not found",
+        )
+
+    # Build new definition — provider_id in body can be different (rename)
+    new_provider_id = payload.provider_id.strip() or provider_id
+    display_name = (
+        payload.display_name.strip() or new_provider_id.replace("_", " ").title()
+    )
+    detected_profile = detect_provider_profile(payload.base_url)
+    api_keys = tuple(k.strip() for k in payload.api_keys if k.strip())
+    if not api_keys:
+        raise HTTPException(status_code=400, detail="At least one API key is required")
+    proxies = tuple(p.strip() for p in payload.proxies if p.strip())
+
+    definition = CustomProviderDefinition(
+        provider_id=new_provider_id,
+        display_name=display_name,
+        base_url=payload.base_url.strip().rstrip("/"),
+        api_keys=api_keys,
+        proxies=proxies,
+        detected_profile=detected_profile,
+    )
+
+    # Remove old key, add with new key if renamed
+    if new_provider_id != provider_id:
+        del definitions[provider_id]
+    definitions[new_provider_id] = definition
+    save_custom_providers_to_managed_env(definitions)
+
+    # Trigger provider generation refresh
+    await services.admin.refresh_catalog()
+    background_tasks.add_task(services.admin.request_restart)
+
+    return {
+        "ok": True,
+        "provider": _custom_provider_status(definition),
+    }
 
 
 def _filtered_values(values: dict[str, Any]) -> dict[str, Any]:

@@ -18,13 +18,21 @@ CUSTOM_PROVIDERS_ENV_KEY = "FCC_CUSTOM_PROVIDERS"
 
 @dataclass(frozen=True, slots=True)
 class CustomProviderDefinition:
-    """A user-defined provider with base_url, keys, and detected profile."""
+    """A user-defined provider with base_url, keys, proxies, and detected profile.
+
+    Each key can have an associated proxy URL. When keys are rotated on
+    rate-limit (429), the pool prefers a key with a *different* proxy so
+    the retry goes through a different IP.
+    """
 
     provider_id: str
     display_name: str
     base_url: str
     api_keys: tuple[str, ...]
-    detected_profile: str | None  # profile id from detection, or None for generic
+    proxies: tuple[str, ...] = ()
+    detected_profile: str | None = (
+        None  # profile id from detection, or None for generic
+    )
 
     def to_descriptor(self) -> ProviderDescriptor:
         """Convert to a catalog-compatible descriptor."""
@@ -128,6 +136,12 @@ def _parse_custom_providers_json(
         if not api_keys:
             continue
 
+        proxies_raw = item.get("proxies")
+        if isinstance(proxies_raw, list):
+            proxies = tuple(p.strip() for p in proxies_raw if p.strip())
+        else:
+            proxies = ()
+
         provider_id = item.get("provider_id", "").strip() or generate_provider_id(
             base_url
         )
@@ -144,6 +158,7 @@ def _parse_custom_providers_json(
             display_name=display_name,
             base_url=base_url,
             api_keys=api_keys,
+            proxies=proxies,
             detected_profile=detected_profile,
         )
 
@@ -172,6 +187,7 @@ def save_custom_providers_to_managed_env(
             "display_name": d.display_name,
             "base_url": d.base_url,
             "api_keys": list(d.api_keys),
+            "proxies": list(d.proxies),
             "detected_profile": d.detected_profile,
         }
         for d in definitions.values()

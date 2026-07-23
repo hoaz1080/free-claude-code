@@ -53,6 +53,10 @@
   
   /* Typography */
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  /* Custom provider form colors */
+  --border: rgba(255, 255, 255, 0.08);
+  --text-subtle: var(--muted);
   
   /* Transitions */
   --transition-fast: 0.15s ease;
@@ -803,6 +807,24 @@ textarea:focus-visible,
 .delete-button:hover {
   background: #a33 !important;
   color: white !important;
+}
+
+.edit-button {
+  background: transparent !important;
+  border: 1px solid var(--accent-border) !important;
+  color: var(--accent) !important;
+}
+
+.edit-button:hover {
+  background: var(--accent-muted) !important;
+  color: var(--accent) !important;
+}
+
+.provider-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+  align-self: flex-start;
 }
 
 .hint {

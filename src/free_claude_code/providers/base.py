@@ -26,11 +26,16 @@ class ProviderConfig:
 
     ``api_keys`` is the canonical multi-key pool. When empty, ``api_key``
     is used as a single-key fallback so existing callers work unchanged.
+
+    ``proxies`` is an optional tuple of proxy URLs aligned with ``api_keys``
+    (one per key). When a key rotates, its associated proxy rotates too so
+    retries can go through a different IP.
     """
 
     api_key: str
     base_url: str
     api_keys: tuple[str, ...] = ()
+    proxies: tuple[str, ...] = ()
     rate_limit: int | None = None
     rate_window: int = 60
     max_concurrency: int = 5
@@ -47,6 +52,19 @@ class ProviderConfig:
         if self.api_keys:
             return self.api_keys
         return (self.api_key,) if self.api_key.strip() else ()
+
+    def effective_proxies(self) -> tuple[str, ...]:
+        """Return the full proxy list aligned with effective_api_keys()."""
+        keys = self.effective_api_keys()
+        if not self.proxies:
+            # Fall back to single proxy when no per-key proxies configured
+            if self.proxy:
+                return (self.proxy,) * len(keys)
+            return ()
+        # Pad or trim to match key count
+        return tuple(
+            self.proxies[i] if i < len(self.proxies) else "" for i in range(len(keys))
+        )
 
 
 class BaseProvider(ABC):

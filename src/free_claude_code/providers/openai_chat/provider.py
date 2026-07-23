@@ -84,20 +84,31 @@ class OpenAIChatProvider(BaseProvider):
         self._model_output_caps: dict[str, int] = {}
         self._rate_limiter = rate_limiter
         self._default_headers = default_headers
-        self._key_pool = ApiKeyPool(list(config.effective_api_keys()))
-        self._http_proxy = config.proxy
+        proxies_list = list(config.effective_proxies())
+        self._key_pool = ApiKeyPool(
+            list(config.effective_api_keys()),
+            proxies=proxies_list,
+        )
         self._http_read_timeout = config.http_read_timeout
         self._http_connect_timeout = config.http_connect_timeout
         self._http_write_timeout = config.http_write_timeout
         self._client = self._build_client()
 
+        # Schedule async proxy health check if event loop is running
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._key_pool.run_proxy_health_checks())
+        except RuntimeError:
+            pass  # No event loop yet — check runs lazily on first rotation
+
     def _build_client(self) -> AsyncOpenAI:
-        """Create an AsyncOpenAI client using the current API key from the pool."""
+        """Create an AsyncOpenAI client using the current API key and proxy from the pool."""
         current_key = self._key_pool.current_key
+        current_proxy = self._key_pool.current_proxy
         http_client = None
-        if self._http_proxy:
+        if current_proxy:
             http_client = httpx.AsyncClient(
-                proxy=self._http_proxy,
+                proxy=current_proxy,
                 timeout=httpx.Timeout(
                     self._http_read_timeout,
                     connect=self._http_connect_timeout,
@@ -120,22 +131,40 @@ class OpenAIChatProvider(BaseProvider):
         )
 
     def _rotate_key(self, reason: str) -> str | None:
-        """Rotate to the next available key and rebuild the client."""
+        """Rotate to the next available key+proxy pair and rebuild the client."""
+        prev_key_id = self._key_pool.current_key_id
+        prev_proxy = self._key_pool.current_proxy
         next_key = self._key_pool.current_key  # _current_entry auto-scans
         logger.info(
-            "{}: rotating API key (reason={}), pool_state={!r}",
+            "{}: rotating key {} (reason={}, proxy={}), pool_state={!r}",
             self._provider_name,
+            prev_key_id,
             reason,
+            prev_proxy,
             self._key_pool,
         )
         self._client = self._build_client()
         return next_key
 
     def _on_key_failure(self, kind: FailureKind, _cooldown: float) -> None:
-        """Handle key failure before retry: mark and rotate."""
+        """Handle key failure before retry: mark and rotate.
+
+        Includes the failed key id in error attribution logging.
+        """
+        failed_key = self._key_pool.current_key_id
         if kind == FailureKind.AUTHENTICATION:
+            logger.error(
+                "{}: key {} auth failure, permanently disabling",
+                self._provider_name,
+                failed_key,
+            )
             self._key_pool.mark_auth_failed()
         elif kind == FailureKind.RATE_LIMIT:
+            logger.warning(
+                "{}: key {} rate-limited (429), rotating to next key+proxy",
+                self._provider_name,
+                failed_key,
+            )
             self._key_pool.mark_rate_limited(60.0)
         if self._key_pool.has_available_key:
             self._rotate_key(kind.value)

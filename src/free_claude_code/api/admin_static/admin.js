@@ -564,15 +564,22 @@ const cpFormMessage = (msg, kind = "") => {
   area.className = `message-area ${kind}`.trim();
 };
 
-function showCustomProviderForm(visible) {
+let cpEditProviderId = null; // null = add mode, string = edit mode
+
+function showCustomProviderForm(visible, editMode = false) {
   byId("addCustomProviderButton").hidden = visible;
   byId("customProviderForm").hidden = !visible;
+  cpEditProviderId = editMode ? editMode : null;
   if (!visible) {
     byId("cpDisplayName").value = "";
     byId("cpBaseUrl").value = "";
     byId("cpApiKeys").value = "";
+    byId("cpProxies").value = "";
     byId("cpProviderId").value = "";
+    byId("cpSaveButton").textContent = "Save";
     cpFormMessage("");
+  } else if (editMode) {
+    byId("cpSaveButton").textContent = "Update";
   }
 }
 
@@ -582,6 +589,29 @@ function parseApiKeys(raw) {
     .split(/[,\n]/)
     .map((k) => k.trim())
     .filter(Boolean);
+}
+
+function parseProxies(raw) {
+  if (!raw.trim()) return [];
+  return raw
+    .split(/[,\n]/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+}
+
+async function editCustomProvider(providerId) {
+  try {
+    const data = await api(`/admin/api/custom-providers/${encodeURIComponent(providerId)}`);
+    byId("cpDisplayName").value = data.display_name || "";
+    byId("cpBaseUrl").value = data.base_url || "";
+    byId("cpApiKeys").value = (data.api_keys || []).join("\n");
+    byId("cpProxies").value = (data.proxies || []).join("\n");
+    byId("cpProviderId").value = data.provider_id || "";
+    showCustomProviderForm(true, providerId);
+    cpFormMessage("");
+  } catch (error) {
+    showMessage(`Could not load provider: ${error.message}`, "error");
+  }
 }
 
 async function saveCustomProvider() {
@@ -596,24 +626,47 @@ async function saveCustomProvider() {
     cpFormMessage("At least one API key is required", "error");
     return;
   }
+  const rawProxies = byId("cpProxies").value;
+  const proxies = parseProxies(rawProxies);
   const displayName = byId("cpDisplayName").value.trim();
   const providerId = byId("cpProviderId").value.trim();
   const saveButton = byId("cpSaveButton");
   saveButton.disabled = true;
-  saveButton.textContent = "Saving...";
+  const originalText = saveButton.textContent;
+  saveButton.textContent = cpEditProviderId ? "Updating..." : "Saving...";
   try {
-    const result = await api("/admin/api/custom-providers", {
-      method: "POST",
-      body: JSON.stringify({ base_url: baseUrl, api_keys: apiKeys, display_name: displayName, provider_id: providerId }),
-    });
+    const body = {
+      base_url: baseUrl,
+      api_keys: apiKeys,
+      proxies: proxies,
+      display_name: displayName,
+      provider_id: providerId,
+    };
+    let result;
+    if (cpEditProviderId) {
+      result = await api(`/admin/api/custom-providers/${encodeURIComponent(cpEditProviderId)}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
+    } else {
+      result = await api("/admin/api/custom-providers", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    }
     showCustomProviderForm(false);
     await loadCustomProviders();
-    showMessage(`Provider "${result.provider.display_name}" added`, "ok");
+    showMessage(
+      cpEditProviderId
+        ? `Provider "${result.provider.display_name}" updated`
+        : `Provider "${result.provider.display_name}" added`,
+      "ok"
+    );
   } catch (error) {
     cpFormMessage(error.message, "error");
   } finally {
     saveButton.disabled = false;
-    saveButton.textContent = "Save";
+    saveButton.textContent = originalText;
   }
 }
 
@@ -655,7 +708,20 @@ function renderCustomProviders(providers) {
 
     const meta = document.createElement("div");
     meta.className = "provider-meta";
-    meta.innerHTML = `${provider.base_url} · ${provider.api_key_count} key${provider.api_key_count !== 1 ? "s" : ""}`;
+    let metaParts = [`${provider.base_url} · ${provider.api_key_count} key${provider.api_key_count !== 1 ? "s" : ""}`];
+    if (provider.proxy_count > 0) {
+      metaParts.push(`${provider.proxy_count} proxy${provider.proxy_count !== 1 ? "ies" : "y"}`);
+    }
+    meta.textContent = metaParts.join(" · ");
+
+    const actions = document.createElement("div");
+    actions.className = "provider-actions";
+
+    const editButton = document.createElement("button");
+    editButton.type = "button";
+    editButton.className = "test-button edit-button";
+    editButton.textContent = "Edit";
+    editButton.addEventListener("click", () => editCustomProvider(provider.provider_id));
 
     const deleteButton = document.createElement("button");
     deleteButton.type = "button";
@@ -665,7 +731,8 @@ function renderCustomProviders(providers) {
       deleteCustomProvider(provider.provider_id, deleteButton),
     );
 
-    card.append(title, meta, deleteButton);
+    actions.append(editButton, deleteButton);
+    card.append(title, meta, actions);
     grid.appendChild(card);
   });
 }

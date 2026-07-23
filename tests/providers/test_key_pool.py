@@ -2,7 +2,15 @@
 
 import pytest
 
-from free_claude_code.providers.key_pool import ApiKeyPool
+from free_claude_code.providers.key_pool import (
+    ApiKeyEntry,
+    ApiKeyPool,
+    mask_key,
+    mask_proxy,
+)
+from free_claude_code.providers.key_pool import (
+    test_proxy_connectivity as _test_proxy_connectivity,
+)
 
 
 class TestApiKeyPoolInit:
@@ -32,7 +40,7 @@ class TestApiKeyPoolInit:
 class TestApiKeyPoolRotation:
     def test_rotate_moves_to_next_healthy_key(self) -> None:
         pool = ApiKeyPool(["key1", "key2", "key3"])
-        # _rotate scans forward from current index, so key1→key2→key3→key1
+        # _rotate scans forward from current index, so key1<e2><b6><ab>key2<e2><86><92>key3→key1
         pool._rotate()
         assert pool.current_key == "key2"
         pool._rotate()
@@ -113,3 +121,113 @@ class TestApiKeyPoolReset:
         pool._rotate()
         # wraps to key1 (dead) → stays at key2
         assert pool.current_key == "key2"
+
+
+class TestApiKeyPoolWithProxies:
+    def test_pool_with_proxies(self) -> None:
+        pool = ApiKeyPool(
+            ["key1", "key2", "key3"],
+            proxies=["http://proxy1:8080", "http://proxy2:8080", "http://proxy3:8080"],
+        )
+        assert pool.current_key == "key1"
+        assert pool.current_proxy == "http://proxy1:8080"
+        assert pool.available_count == 3
+
+    def test_proxy_fewer_than_keys_pads_with_empty(self) -> None:
+        pool = ApiKeyPool(
+            ["key1", "key2", "key3"],
+            proxies=["http://proxy1:8080"],
+        )
+        assert pool.current_key == "key1"
+        assert pool.current_proxy == "http://proxy1:8080"
+        pool._rotate()
+        assert pool.current_key == "key2"
+        assert pool.current_proxy == ""  # padded
+
+    def test_proxy_more_than_keys_truncated(self) -> None:
+        pool = ApiKeyPool(
+            ["key1", "key2"],
+            proxies=["http://proxy1:8080", "http://proxy2:8080", "http://extra:3128"],
+        )
+        assert pool.current_key == "key1"
+        assert pool.current_proxy == "http://proxy1:8080"
+        pool._rotate()
+        assert pool.current_key == "key2"
+        assert pool.current_proxy == "http://proxy2:8080"
+
+    def test_no_proxies_returns_empty_string(self) -> None:
+        pool = ApiKeyPool(["key1", "key2"])
+        assert pool.current_proxy == ""
+
+    def test_rotate_prefers_different_proxy_on_rate_limit(self) -> None:
+        pool = ApiKeyPool(
+            ["key1", "key2", "key3"],
+            proxies=["http://proxy1:8080", "http://proxy2:8080", "http://proxy3:8080"],
+        )
+        # key1 with proxy1 is rate limited → should rotate to key2 (different proxy)
+        pool.mark_rate_limited(30.0)
+        # After rotate: key1 blocked, now on key2
+        assert pool.current_key == "key2"
+        assert pool.current_proxy == "http://proxy2:8080"
+
+    def test_proxy_unhealthy_marks_entry_unavailable(self) -> None:
+        entry = ApiKeyEntry(key="test-key", proxy="http://bad-proxy:9999")
+        assert entry.available is True
+        entry.proxy_unhealthy = True
+        assert entry.available is False
+
+    def test_pool_skips_proxy_unhealthy_entries(self) -> None:
+        pool = ApiKeyPool(
+            ["key1", "key2", "key3"],
+            proxies=["http://bad:3128", "http://proxy2:8080", "http://proxy3:8080"],
+            health_check_proxies=False,
+        )
+        # Force proxy1 unhealthy
+        pool._entries[0].proxy_unhealthy = True
+        assert pool.current_key == "key2"  # auto-skips to key2
+
+    def test_current_key_id_masks_key(self) -> None:
+        pool = ApiKeyPool(["sk-1234567890abcdef"], health_check_proxies=False)
+        eid = pool.current_key_id
+        assert "sk-123" in eid
+        assert "abcdef" not in eid
+
+    def test_no_available_key_returns_empty_proxy(self) -> None:
+        pool = ApiKeyPool(["key1"], health_check_proxies=False)
+        pool.mark_auth_failed()
+        assert pool.current_key is None
+        assert pool.current_proxy == ""
+        assert pool.current_key_id == "unknown"
+
+
+class TestMaskHelpers:
+    def test_mask_key_short(self) -> None:
+        assert mask_key("abc") == "abc****"
+
+    def test_mask_key_long(self) -> None:
+        masked = mask_key("sk-1234567890abcdef")
+        assert masked.startswith("sk-123")
+        assert "..." in masked
+        assert "cdef" in masked
+
+    def test_mask_proxy_no_password(self) -> None:
+        assert mask_proxy("http://proxy:8080") == "http://proxy:8080"
+
+    def test_mask_proxy_with_password(self) -> None:
+        masked = mask_proxy("http://user:pass@proxy:8080")
+        assert "pass" not in masked
+        assert "****" in masked
+
+    def test_mask_proxy_empty(self) -> None:
+        assert mask_proxy("") == ""
+
+
+class TestProxyConnectivity:
+    @pytest.mark.asyncio
+    async def test_empty_proxy_is_healthy(self) -> None:
+        assert await _test_proxy_connectivity("") is True
+
+    @pytest.mark.asyncio
+    async def test_unreachable_proxy_returns_false(self) -> None:
+        result = await _test_proxy_connectivity("http://127.0.0.1:1", timeout=1.0)
+        assert result is False

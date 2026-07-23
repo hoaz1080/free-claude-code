@@ -194,6 +194,7 @@ def create_provider(
         descriptor,
         settings,
         custom_api_keys=custom_api_keys,
+        custom_proxies=custom_def.proxies if custom_def and is_custom else None,
     )
     rate_limiter = ProviderRateLimiter(
         rate_limit=config.rate_limit or 40,
