@@ -80,8 +80,7 @@
               </div>
               <div id="proxyForm" class="custom-provider-form" hidden>
                 <div class="form-row">
-                  <label>Proxy URL <input id="ppUrl" type="text" placeholder="http://user:pass@host:8080" required /></label>
-                  <label>Label (optional) <input id="ppLabel" type="text" placeholder="Home proxy, Work proxy" /></label>
+                  <label>Proxy URLs <textarea id="ppTextarea" rows="5" placeholder="One proxy per line:&#10;http://user:pass@host1:8080 Home&#10;socks5://host2:1080 Work&#10;http://host3:8080&#10;&#10;Or comma-separated: http://p1:8080, http://p2:8080"></textarea></label>
                 </div>
                 <div class="form-actions">
                   <button id="ppSaveButton" class="primary-button" type="button">Save</button>

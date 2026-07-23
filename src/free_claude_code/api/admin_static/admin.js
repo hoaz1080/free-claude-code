@@ -769,12 +769,42 @@ const ppFormMessage = (msg, kind = "") => {
   area.className = `message-area ${kind}`.trim();
 };
 
+function parseProxyBulk(raw) {
+  if (!raw.trim()) return [];
+  // Split by newlines and commas: "http://p1:8080 Home\nhttp://p2:8080" or "p1, p2"
+  const items = [];
+  const lines = raw.split(/\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    // Try comma-separated on this line
+    const commaParts = trimmed.split(/,/);
+    for (const part of commaParts) {
+      const p = part.trim();
+      if (!p) continue;
+      // Check if there's a label after the URL (space-separated)
+      // Only apply label parsing if the part looks like a URL
+      if (p.startsWith("http://") || p.startsWith("https://") || p.startsWith("socks5://") || p.startsWith("socks5h://")) {
+        // First space separates URL from optional label
+        const spaceIdx = p.indexOf(" ");
+        if (spaceIdx > 0) {
+          items.push({ url: p.slice(0, spaceIdx), label: p.slice(spaceIdx + 1).trim() });
+        } else {
+          items.push({ url: p, label: "" });
+        }
+      } else {
+        items.push({ url: p, label: "" });
+      }
+    }
+  }
+  return items;
+}
+
 function showProxyForm(visible) {
   byId("addProxyButton").hidden = visible;
   byId("proxyForm").hidden = !visible;
   if (!visible) {
-    byId("ppUrl").value = "";
-    byId("ppLabel").value = "";
+    byId("ppTextarea").value = "";
     ppFormMessage("");
   }
 }
@@ -882,23 +912,25 @@ function renderProxyPool(proxies) {
 }
 
 async function saveProxy() {
-  const url = byId("ppUrl").value.trim();
-  if (!url) {
-    ppFormMessage("Proxy URL is required", "error");
+  const raw = byId("ppTextarea").value;
+  const items = parseProxyBulk(raw);
+  if (!items.length) {
+    ppFormMessage("At least one proxy URL is required", "error");
     return;
   }
-  const label = byId("ppLabel").value.trim();
   const saveButton = byId("ppSaveButton");
   saveButton.disabled = true;
   saveButton.textContent = "Saving...";
   try {
-    await api("/admin/api/proxies", {
+    const result = await api("/admin/api/proxies/bulk", {
       method: "POST",
-      body: JSON.stringify({ url, label }),
+      body: JSON.stringify({ proxies: items }),
     });
     showProxyForm(false);
     await loadProxyPool();
-    showMessage("Proxy added", "ok");
+    let msg = `${result.added} proxy added`;
+    if (result.skipped) msg += ` (${result.skipped} skipped as duplicates)`;
+    showMessage(msg, "ok");
   } catch (error) {
     ppFormMessage(error.message, "error");
   } finally {

@@ -431,6 +431,38 @@ async def add_proxy(
     return {"ok": True, "index": len(entries) - 1}
 
 
+class ProxyBulkPayload(BaseModel):
+    """Multiple proxy URLs to add at once."""
+
+    proxies: list[ProxyAddPayload] = Field(min_length=1, max_length=100)
+
+
+@router.post("/admin/api/proxies/bulk")
+async def add_proxies_bulk(
+    payload: ProxyBulkPayload,
+    request: Request,
+):
+    """Add multiple proxy URLs to the pool at once."""
+    require_loopback_admin(request)
+    entries = load_proxy_pool()
+    existing_urls = {e.url for e in entries}
+
+    added = 0
+    skipped = 0
+    for item in payload.proxies:
+        url = item.url.strip()
+        if not url or url in existing_urls:
+            skipped += 1
+            continue
+        entry = ProxyPoolEntry(url=url, label=item.label.strip())
+        entries.append(entry)
+        existing_urls.add(url)
+        added += 1
+
+    save_proxy_pool(entries)
+    return {"ok": True, "added": added, "skipped": skipped}
+
+
 @router.delete("/admin/api/proxies/{index}")
 async def delete_proxy(index: int, request: Request):
     """Remove a proxy from the pool by index."""
