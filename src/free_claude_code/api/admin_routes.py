@@ -24,6 +24,13 @@ from free_claude_code.config.detection import (
     generate_provider_id,
 )
 from free_claude_code.config.model_refs import configured_chat_model_refs
+from free_claude_code.config.proxy_pool import (
+    ProxyPoolEntry,
+    load_proxy_pool,
+    save_proxy_pool,
+    test_all_pool_proxies,
+    test_pool_proxy,
+)
 
 from .dependencies import get_services
 from .ports import ApiServices
@@ -371,6 +378,124 @@ async def edit_custom_provider(
     return {
         "ok": True,
         "provider": _custom_provider_status(definition),
+    }
+
+
+# ─── Proxy Pool ────────────────────────────────────────────────────
+
+
+class ProxyAddPayload(BaseModel):
+    """One proxy URL to add to the pool."""
+
+    url: str = Field(
+        min_length=1, description="Proxy URL, e.g. http://user:pass@host:8080"
+    )
+    label: str = Field(default="")
+
+
+@router.get("/admin/api/proxies")
+async def list_proxies(request: Request):
+    """List all proxies in the pool with health status."""
+    require_loopback_admin(request)
+    entries = load_proxy_pool()
+    return {
+        "proxies": [
+            {
+                "index": i,
+                "url": e.url,
+                "label": e.label,
+                "healthy": e.healthy,
+                "last_tested": e.last_tested,
+            }
+            for i, e in enumerate(entries)
+        ]
+    }
+
+
+@router.post("/admin/api/proxies")
+async def add_proxy(
+    payload: ProxyAddPayload,
+    request: Request,
+):
+    """Add a proxy URL to the pool."""
+    require_loopback_admin(request)
+    entries = load_proxy_pool()
+
+    url = payload.url.strip()
+    if any(e.url == url for e in entries):
+        raise HTTPException(status_code=409, detail=f"Proxy '{url}' already exists")
+
+    entry = ProxyPoolEntry(url=url, label=payload.label.strip())
+    entries.append(entry)
+    save_proxy_pool(entries)
+    return {"ok": True, "index": len(entries) - 1}
+
+
+@router.delete("/admin/api/proxies/{index}")
+async def delete_proxy(index: int, request: Request):
+    """Remove a proxy from the pool by index."""
+    require_loopback_admin(request)
+    entries = load_proxy_pool()
+    if index < 0 or index >= len(entries):
+        raise HTTPException(status_code=404, detail=f"Proxy index {index} not found")
+    removed = entries.pop(index)
+    save_proxy_pool(entries)
+    return {"ok": True, "url": removed.url}
+
+
+@router.post("/admin/api/proxies/test")
+async def test_all_proxies(
+    request: Request,
+):
+    """Test all proxies in the pool concurrently."""
+    require_loopback_admin(request)
+    import time
+
+    entries = load_proxy_pool()
+    if not entries:
+        return {"results": []}
+
+    start = time.monotonic()
+    results = await test_all_pool_proxies(entries, timeout=5.0)
+    elapsed = time.monotonic() - start
+    save_proxy_pool(entries)
+
+    return {
+        "results": [
+            {
+                "index": i,
+                "url": e.url,
+                "label": e.label,
+                "healthy": e.healthy,
+                "duration_ms": int(elapsed * 1000 / max(1, len(entries))),
+            }
+            for i, e in enumerate(results)
+        ]
+    }
+
+
+@router.post("/admin/api/proxies/{index}/test")
+async def test_one_proxy(index: int, request: Request):
+    """Test a single proxy in the pool."""
+    require_loopback_admin(request)
+    import time
+
+    entries = load_proxy_pool()
+    if index < 0 or index >= len(entries):
+        raise HTTPException(status_code=404, detail=f"Proxy index {index} not found")
+
+    entry = entries[index]
+    start = time.monotonic()
+    healthy = await test_pool_proxy(entry, timeout=5.0)
+    elapsed = time.monotonic() - start
+    save_proxy_pool(entries)
+
+    return {
+        "url": entry.url,
+        "label": entry.label,
+        "healthy": healthy,
+        "ok": True,
+        "duration_ms": int(elapsed * 1000),
     }
 
 

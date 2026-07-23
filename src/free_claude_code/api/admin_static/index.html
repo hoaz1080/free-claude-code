@@ -69,6 +69,35 @@
             ></div>
           </section>
 
+          <section id="view-proxies" class="admin-view" data-view="proxies" hidden>
+            <section class="provider-strip" aria-label="Proxy pool">
+              <div class="strip-header">
+                <h3>Proxy Pool</h3>
+                <div style="display:flex;gap:8px">
+                  <button id="testAllProxiesButton" class="secondary-button" type="button">Test All</button>
+                  <button id="addProxyButton" class="test-button" type="button">+ Add</button>
+                </div>
+              </div>
+              <div id="proxyForm" class="custom-provider-form" hidden>
+                <div class="form-row">
+                  <label>Proxy URL <input id="ppUrl" type="text" placeholder="http://user:pass@host:8080" required /></label>
+                  <label>Label (optional) <input id="ppLabel" type="text" placeholder="Home proxy, Work proxy" /></label>
+                </div>
+                <div class="form-actions">
+                  <button id="ppSaveButton" class="primary-button" type="button">Save</button>
+                  <button id="ppCancelButton" class="secondary-button" type="button">Cancel</button>
+                </div>
+                <div id="ppFormMessage" class="message-area"></div>
+              </div>
+              <p class="hint" style="margin:0 0 16px;font-size:12px">
+                Proxies in this pool are automatically used by <strong>all</strong> providers (including built-in ones like NVIDIA NIM).
+                When the pool is empty, providers fall back to their individual proxy settings.
+                Use "Test" to verify connectivity before they are used.
+              </p>
+              <div id="proxyGrid" class="provider-grid"></div>
+            </section>
+          </section>
+
           <section id="view-model_config" class="admin-view" data-view="model_config" hidden>
             <div
               id="modelConfigSections"

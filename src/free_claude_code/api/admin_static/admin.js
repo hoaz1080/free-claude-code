@@ -16,6 +16,13 @@ const VIEW_GROUPS = [
     containerId: "providersSections",
   },
   {
+    id: "proxies",
+    label: "Proxies",
+    title: "Proxy Pool",
+    sections: [],
+    containerId: "proxySections",
+  },
+  {
     id: "model_config",
     label: "Model Config",
     title: "Model Config",
@@ -754,8 +761,178 @@ byId("cpCancelButton").addEventListener("click", () =>
 );
 byId("cpSaveButton").addEventListener("click", saveCustomProvider);
 
+// ─── Proxy Pool ────────────────────────────────────────────────
+
+const ppFormMessage = (msg, kind = "") => {
+  const area = byId("ppFormMessage");
+  area.textContent = msg;
+  area.className = `message-area ${kind}`.trim();
+};
+
+function showProxyForm(visible) {
+  byId("addProxyButton").hidden = visible;
+  byId("proxyForm").hidden = !visible;
+  if (!visible) {
+    byId("ppUrl").value = "";
+    byId("ppLabel").value = "";
+    ppFormMessage("");
+  }
+}
+
+async function loadProxyPool() {
+  try {
+    const result = await api("/admin/api/proxies");
+    renderProxyPool(result.proxies);
+  } catch {
+    // silently fail
+  }
+}
+
+function proxyStatusLabel(proxy) {
+  if (proxy.healthy === true) return "Healthy";
+  if (proxy.healthy === false) return "Unhealthy";
+  return "Untested";
+}
+
+function proxyStatusClass(proxy) {
+  if (proxy.healthy === true) return "ok";
+  if (proxy.healthy === false) return "error";
+  return "neutral";
+}
+
+function proxyLastTested(proxy) {
+  if (!proxy.last_tested || proxy.last_tested === 0) return "";
+  const d = new Date(proxy.last_tested * 1000);
+  return d.toLocaleString();
+}
+
+function renderProxyPool(proxies) {
+  const grid = byId("proxyGrid");
+  grid.innerHTML = "";
+  if (!proxies || !proxies.length) {
+    grid.innerHTML =
+      '<p class="hint">No proxies in pool. Click "+ Add" to add a proxy URL. Healthy proxies in the pool are automatically used by all providers.</p>';
+    return;
+  }
+  proxies.forEach((proxy) => {
+    const card = document.createElement("article");
+    card.className = "provider-card";
+    card.dataset.proxyIndex = proxy.index;
+
+    const title = document.createElement("div");
+    title.className = "provider-title";
+    const displayLabel = proxy.label || proxy.url;
+    title.innerHTML = `<strong>${proxy.url}</strong>`;
+
+    const pill = document.createElement("span");
+    pill.className = `status-pill ${proxyStatusClass(proxy)}`;
+    pill.textContent = proxyStatusLabel(proxy);
+    title.appendChild(pill);
+
+    const meta = document.createElement("div");
+    meta.className = "provider-meta";
+    const parts = [];
+    if (proxy.label) parts.push(proxy.label);
+    const tested = proxyLastTested(proxy);
+    if (tested) parts.push(`Tested: ${tested}`);
+    meta.textContent = parts.length ? parts.join(" · ") : "Not tested yet";
+
+    const actions = document.createElement("div");
+    actions.className = "provider-actions";
+
+    const testButton = document.createElement("button");
+    testButton.type = "button";
+    testButton.className = "test-button";
+    testButton.textContent = "Test";
+    testButton.addEventListener("click", async () => {
+      testButton.disabled = true;
+      testButton.textContent = "Testing";
+      try {
+        const r = await api(`/admin/api/proxies/${proxy.index}/test`, { method: "POST" });
+        pill.className = `status-pill ${r.healthy ? "ok" : "error"}`;
+        pill.textContent = r.healthy ? "Healthy" : "Unhealthy";
+        await loadProxyPool();
+      } catch (err) {
+        pill.textContent = "Error";
+      } finally {
+        testButton.disabled = false;
+        testButton.textContent = "Test";
+      }
+    });
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "test-button delete-button";
+    deleteButton.textContent = "Delete";
+    deleteButton.addEventListener("click", async () => {
+      if (!confirm(`Delete proxy "${proxy.url}"?`)) return;
+      deleteButton.disabled = true;
+      try {
+        await api(`/admin/api/proxies/${proxy.index}`, { method: "DELETE" });
+        card.remove();
+      } catch (err) {
+        showMessage(`Delete failed: ${err.message}`, "error");
+      }
+    });
+
+    actions.append(testButton, deleteButton);
+    card.append(title, meta, actions);
+    grid.appendChild(card);
+  });
+}
+
+async function saveProxy() {
+  const url = byId("ppUrl").value.trim();
+  if (!url) {
+    ppFormMessage("Proxy URL is required", "error");
+    return;
+  }
+  const label = byId("ppLabel").value.trim();
+  const saveButton = byId("ppSaveButton");
+  saveButton.disabled = true;
+  saveButton.textContent = "Saving...";
+  try {
+    await api("/admin/api/proxies", {
+      method: "POST",
+      body: JSON.stringify({ url, label }),
+    });
+    showProxyForm(false);
+    await loadProxyPool();
+    showMessage("Proxy added", "ok");
+  } catch (error) {
+    ppFormMessage(error.message, "error");
+  } finally {
+    saveButton.disabled = false;
+    saveButton.textContent = "Save";
+  }
+}
+
+async function testAllProxies() {
+  const button = byId("testAllProxiesButton");
+  if (!button) return;
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = "Testing ...";
+  try {
+    await api("/admin/api/proxies/test", { method: "POST" });
+    await loadProxyPool();
+    showMessage("All proxies tested", "ok");
+  } catch (error) {
+    showMessage(`Test failed: ${error.message}`, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+byId("addProxyButton")?.addEventListener("click", () => showProxyForm(true));
+byId("ppCancelButton")?.addEventListener("click", () => showProxyForm(false));
+byId("ppSaveButton")?.addEventListener("click", saveProxy);
+byId("testAllProxiesButton")?.addEventListener("click", testAllProxies);
+
 // ─── Init ────────────────────────────────────────────────────────
 loadCustomProviders();
+loadProxyPool();
 
 byId("validateButton").addEventListener("click", () => validate(true));
 byId("applyButton").addEventListener("click", apply);

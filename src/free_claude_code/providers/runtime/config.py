@@ -7,6 +7,13 @@ from free_claude_code.config.settings import Settings
 from free_claude_code.providers.base import ProviderConfig
 
 
+def _load_proxy_pool_urls() -> tuple[str, ...]:
+    """Load healthy/untested proxies from the shared pool."""
+    from free_claude_code.config.proxy_pool import load_healthy_proxy_urls
+
+    return load_healthy_proxy_urls()
+
+
 def string_setting(settings: Settings, attr_name: str | None, default: str = "") -> str:
     """Return a string-valued settings attribute, ignoring non-string mocks."""
     if attr_name is None:
@@ -69,6 +76,14 @@ def build_provider_config(
         # Parse proxy env var into per-key proxies (comma-separated)
         proxy_raw = string_setting(settings, descriptor.proxy_attr)
         proxies = tuple(parse_api_keys(proxy_raw))
+
+    # Shared proxy pool overrides individual proxy settings
+    pool_proxies = _load_proxy_pool_urls()
+    if pool_proxies:
+        # Replicate pool proxies round-robin to match key count
+        proxies = tuple(
+            pool_proxies[i % len(pool_proxies)] for i in range(len(api_keys))
+        )
 
     base_url = string_setting(
         settings, descriptor.base_url_attr, descriptor.default_base_url or ""
