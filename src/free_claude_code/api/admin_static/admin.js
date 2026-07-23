@@ -193,7 +193,8 @@ function updateProviderCard(providerId, status, label, metaText) {
 
 function renderSections(sections, fields) {
   VIEW_GROUPS.forEach((view) => {
-    byId(view.containerId).innerHTML = "";
+    const container = byId(view.containerId);
+    if (container) container.innerHTML = "";
   });
 
   const sectionById = new Map(sections.map((section) => [section.id, section]));
@@ -206,6 +207,7 @@ function renderSections(sections, fields) {
 
   VIEW_GROUPS.forEach((view) => {
     const container = byId(view.containerId);
+    if (!container) return;
     view.sections.forEach((sectionId) => {
       const section = sectionById.get(sectionId);
       const sectionFields = bySection.get(sectionId) || [];
@@ -922,10 +924,31 @@ async function saveProxy() {
   saveButton.disabled = true;
   saveButton.textContent = "Saving...";
   try {
-    const result = await api("/admin/api/proxies/bulk", {
+    const resp = await fetch("/admin/api/proxies/bulk", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ proxies: items }),
     });
+    if (!resp.ok) {
+      // Try to read validation detail from 422 etc.
+      let detail = `${resp.status} ${resp.statusText}`;
+      try {
+        const body = await resp.json();
+        if (body.detail) {
+          if (typeof body.detail === "string") {
+            detail = body.detail;
+          } else if (Array.isArray(body.detail)) {
+            detail = body.detail
+              .map((d) => `${d.loc?.join(" → ")}: ${d.msg}`)
+              .join("; ");
+          }
+        }
+      } catch {
+        // fall back to status text
+      }
+      throw new Error(detail);
+    }
+    const result = await resp.json();
     showProxyForm(false);
     await loadProxyPool();
     let msg = `${result.added} proxy added`;
