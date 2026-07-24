@@ -463,6 +463,98 @@ async def add_proxies_bulk(
     return {"ok": True, "added": added, "skipped": skipped}
 
 
+def _parse_remote_proxies(text: str) -> list[ProxyAddPayload]:
+    """Parse proxy URLs from fetched text (one per line or comma-separated).
+
+    Lines with explicit schemes (http/https/socks5/socks5h) are kept.
+    Bare ``host:port`` lines are wrapped as ``http://`` (most free proxy
+    lists are HTTP proxies). Comment lines (``#``) and blank lines are
+    skipped.
+    """
+    items: list[ProxyAddPayload] = []
+    schemes = ("http://", "https://", "socks5://", "socks5h://")
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        for part in stripped.split(","):
+            p = part.strip()
+            if not p:
+                continue
+            if any(p.startswith(sch) for sch in schemes):
+                url, sep, label = p.partition(" ")
+                items.append(
+                    ProxyAddPayload(url=url, label=label.strip() if sep else "")
+                )
+            elif ":" in p:
+                items.append(ProxyAddPayload(url=f"http://{p}", label=""))
+    return items
+
+
+# These two routes are declared BEFORE the ``{index}`` routes below so that
+# the literal path segments "unhealthy" / "import" are matched directly
+# rather than attempted as an int index parameter.
+
+
+@router.delete("/admin/api/proxies/unhealthy")
+async def remove_unhealthy_proxies(request: Request):
+    """Remove all proxies marked unhealthy from the pool."""
+    require_loopback_admin(request)
+    entries = load_proxy_pool()
+    before = len(entries)
+    survivors = [e for e in entries if e.healthy is not False]
+    removed = before - len(survivors)
+    save_proxy_pool(survivors)
+    return {"ok": True, "removed": removed, "remaining": len(survivors)}
+
+
+@router.post("/admin/api/proxies/import")
+async def import_proxies(
+    request: Request,
+    payload: dict[str, Any],
+):
+    """Fetch proxy URLs from a remote URL (e.g. a raw GitHub file) and add them.
+
+    Body: ``{"url": "https://raw.githubusercontent.com/.../proxies.txt"}``.
+    Lines with schemes are added; bare ``host:port`` lines become HTTP
+    proxies. Existing URLs are skipped (deduped).
+    """
+    require_loopback_admin(request)
+    url = str(payload.get("url", "")).strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="A valid http(s) URL is required")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            text = response.text
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Failed to fetch URL: {exc}"
+        ) from exc
+
+    if len(text) > 2_000_000:
+        raise HTTPException(status_code=413, detail="Source too large (>2 MB)")
+
+    parsed = _parse_remote_proxies(text)
+    entries = load_proxy_pool()
+    existing_urls = {e.url for e in entries}
+    added = 0
+    skipped = 0
+    for item in parsed:
+        proxy_url = item.url.strip()
+        if not proxy_url or proxy_url in existing_urls:
+            skipped += 1
+            continue
+        entries.append(ProxyPoolEntry(url=proxy_url, label=item.label.strip()))
+        existing_urls.add(proxy_url)
+        added += 1
+
+    save_proxy_pool(entries)
+    return {"ok": True, "parsed": len(parsed), "added": added, "skipped": skipped}
+
+
 @router.delete("/admin/api/proxies/{index}")
 async def delete_proxy(index: int, request: Request):
     """Remove a proxy from the pool by index."""

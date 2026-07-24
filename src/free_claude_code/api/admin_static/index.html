@@ -73,10 +73,26 @@
             <section class="provider-strip" aria-label="Proxy pool">
               <div class="strip-header">
                 <h3>Proxy Pool</h3>
-                <div style="display:flex;gap:8px">
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                  <button id="importProxyButton" class="secondary-button" type="button">Import from URL</button>
                   <button id="testAllProxiesButton" class="secondary-button" type="button">Test All</button>
+                  <button id="removeUnhealthyButton" class="test-button delete-button" type="button">Remove Unhealthy</button>
                   <button id="addProxyButton" class="test-button" type="button">+ Add</button>
                 </div>
+              </div>
+              <div id="importProxyForm" class="custom-provider-form" hidden>
+                <div class="form-row">
+                  <label>GitHub / raw URL <input id="importProxyUrl" type="url" placeholder="https://raw.githubusercontent.com/user/repo/main/proxies.txt" /></label>
+                </div>
+                <div class="form-actions">
+                  <button id="importProxySubmit" class="primary-button" type="button">Import</button>
+                  <button id="importProxyCancel" class="secondary-button" type="button">Cancel</button>
+                </div>
+                <p class="hint" style="margin:8px 0 0;font-size:12px">
+                  Fetches the URL and adds each proxy line. Lines with a scheme (http/https/socks5) are kept as-is;
+                  bare <code>host:port</code> lines become HTTP proxies. Duplicates are skipped.
+                </p>
+                <div id="importProxyMessage" class="message-area"></div>
               </div>
               <div id="proxyForm" class="custom-provider-form" hidden>
                 <div class="form-row">

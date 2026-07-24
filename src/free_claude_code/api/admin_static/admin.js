@@ -771,6 +771,13 @@ const ppFormMessage = (msg, kind = "") => {
   area.className = `message-area ${kind}`.trim();
 };
 
+const importProxyMessage = (msg, kind = "") => {
+  const area = byId("importProxyMessage");
+  if (!area) return;
+  area.textContent = msg;
+  area.className = `message-area ${kind}`.trim();
+};
+
 function parseProxyBulk(raw) {
   if (!raw.trim()) return [];
   // Split by newlines and commas: "http://p1:8080 Home\nhttp://p2:8080" or "p1, p2"
@@ -980,10 +987,90 @@ async function testAllProxies() {
   }
 }
 
+function showImportProxyForm(visible) {
+  byId("importProxyButton").hidden = visible;
+  byId("importProxyForm").hidden = !visible;
+  if (!visible) {
+    byId("importProxyUrl").value = "";
+    importProxyMessage("");
+  }
+}
+
+async function removeUnhealthyProxies() {
+  const button = byId("removeUnhealthyButton");
+  if (!button) return;
+  if (!confirm("Remove all proxies marked unhealthy? Untested and healthy proxies are kept.")) {
+    return;
+  }
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = "Removing ...";
+  try {
+    const result = await api("/admin/api/proxies/unhealthy", { method: "DELETE" });
+    await loadProxyPool();
+    if (result.removed) {
+      showMessage(`Removed ${result.removed} unhealthy proxy${result.removed === 1 ? "" : "ies"} (${result.remaining} remaining)`, "ok");
+    } else {
+      showMessage("No unhealthy proxies to remove", "ok");
+    }
+  } catch (error) {
+    showMessage(`Remove failed: ${error.message}`, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+async function importProxies() {
+  const url = byId("importProxyUrl").value.trim();
+  if (!url) {
+    importProxyMessage("A URL is required", "error");
+    return;
+  }
+  const button = byId("importProxySubmit");
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = "Importing ...";
+  try {
+    const resp = await fetch("/admin/api/proxies/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    if (!resp.ok) {
+      let detail = `${resp.status} ${resp.statusText}`;
+      try {
+        const body = await resp.json();
+        if (typeof body.detail === "string") detail = body.detail;
+      } catch {
+        // fall back to status text
+      }
+      throw new Error(detail);
+    }
+    const result = await resp.json();
+    if (result.added) {
+      showImportProxyForm(false);
+      await loadProxyPool();
+      showMessage(`Imported ${result.added} of ${result.parsed} proxy URL${result.added === 1 ? "" : "s"}${result.skipped ? ` (${result.skipped} skipped as duplicates)` : ""}`, "ok");
+    } else {
+      importProxyMessage(`Parsed ${result.parsed} URL${result.parsed === 1 ? "" : "s"} but none were new (all duplicates)`, "warn");
+    }
+  } catch (error) {
+    importProxyMessage(error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
 byId("addProxyButton")?.addEventListener("click", () => showProxyForm(true));
 byId("ppCancelButton")?.addEventListener("click", () => showProxyForm(false));
 byId("ppSaveButton")?.addEventListener("click", saveProxy);
 byId("testAllProxiesButton")?.addEventListener("click", testAllProxies);
+byId("importProxyButton")?.addEventListener("click", () => showImportProxyForm(true));
+byId("importProxyCancel")?.addEventListener("click", () => showImportProxyForm(false));
+byId("importProxySubmit")?.addEventListener("click", importProxies);
+byId("removeUnhealthyButton")?.addEventListener("click", removeUnhealthyProxies);
 
 // ─── Init ────────────────────────────────────────────────────────
 loadCustomProviders();
