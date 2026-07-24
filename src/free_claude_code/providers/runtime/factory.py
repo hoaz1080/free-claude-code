@@ -190,11 +190,19 @@ def create_provider(
             )
         raise UnknownProviderError.for_provider(provider_id, PROVIDER_CATALOG)
 
+    # Shared proxy pool: healthy/untested proxies applied to all providers.
+    # Read here (not in the pure config builder) so the pool can be injected
+    # in tests and the builder stays deterministic.
+    from free_claude_code.config.proxy_pool import load_healthy_proxy_urls
+
+    pool_proxies = load_healthy_proxy_urls()
+
     config = build_provider_config(
         descriptor,
         settings,
         custom_api_keys=custom_api_keys,
         custom_proxies=custom_def.proxies if custom_def and is_custom else None,
+        pool_proxies=pool_proxies,
     )
     rate_limiter = ProviderRateLimiter(
         rate_limit=config.rate_limit or 40,

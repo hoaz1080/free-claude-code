@@ -100,7 +100,7 @@ def _extract_dotenv_key(content: str, key: str) -> str | None:
             continue
         value = v.strip()
         if value.startswith('"') and value.endswith('"'):
-            value = value[1:-1]
+            value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
         return value
     return None
 

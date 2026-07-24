@@ -161,6 +161,58 @@ def test_ollama_cloud_provider_config_uses_key_and_proxy():
     assert config.proxy == "http://proxy.test:8080"
 
 
+def test_build_provider_config_pool_proxies_override_env_proxy() -> None:
+    """Shared pool proxies override the per-provider proxy env var."""
+    descriptor = PROVIDER_CATALOG["ollama_cloud"]
+    settings = _make_settings(
+        ollama_api_key="ollama-cloud-token",
+        ollama_cloud_proxy="http://proxy.test:8080",
+    )
+
+    config = build_provider_config(
+        descriptor, settings, pool_proxies=("socks5://pool1:1080",)
+    )
+
+    assert config.proxy == "socks5://pool1:1080"
+    assert config.proxies == ("socks5://pool1:1080",)
+
+
+def test_build_provider_config_pool_proxies_round_robin_per_key() -> None:
+    """Pool proxies replicate round-robin to cover all keys (different IPs)."""
+    descriptor = PROVIDER_CATALOG["ollama_cloud"]
+    settings = _make_settings(ollama_api_key="k1,k2,k3,k4")
+
+    config = build_provider_config(
+        descriptor,
+        settings,
+        pool_proxies=("socks5://pa:1080", "socks5://pb:1080"),
+    )
+
+    # 4 keys, 2 pool proxies -> pa, pb, pa, pb
+    assert config.proxies == (
+        "socks5://pa:1080",
+        "socks5://pb:1080",
+        "socks5://pa:1080",
+        "socks5://pb:1080",
+    )
+    assert config.proxy == "socks5://pa:1080"
+
+
+def test_build_provider_config_empty_pool_keeps_env_proxy() -> None:
+    """No pool proxies (None or empty) falls back to per-provider proxy."""
+    descriptor = PROVIDER_CATALOG["ollama_cloud"]
+    settings = _make_settings(
+        ollama_api_key="ollama-cloud-token",
+        ollama_cloud_proxy="http://proxy.test:8080",
+    )
+
+    config_none = build_provider_config(descriptor, settings, pool_proxies=None)
+    config_empty = build_provider_config(descriptor, settings, pool_proxies=())
+
+    assert config_none.proxy == "http://proxy.test:8080"
+    assert config_empty.proxy == "http://proxy.test:8080"
+
+
 @pytest.mark.parametrize(
     ("provider_id", "expected_api_key"),
     [

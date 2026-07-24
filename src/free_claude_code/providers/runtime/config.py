@@ -7,13 +7,6 @@ from free_claude_code.config.settings import Settings
 from free_claude_code.providers.base import ProviderConfig
 
 
-def _load_proxy_pool_urls() -> tuple[str, ...]:
-    """Load healthy/untested proxies from the shared pool."""
-    from free_claude_code.config.proxy_pool import load_healthy_proxy_urls
-
-    return load_healthy_proxy_urls()
-
-
 def string_setting(settings: Settings, attr_name: str | None, default: str = "") -> str:
     """Return a string-valued settings attribute, ignoring non-string mocks."""
     if attr_name is None:
@@ -51,6 +44,7 @@ def build_provider_config(
     *,
     custom_api_keys: tuple[str, ...] | None = None,
     custom_proxies: tuple[str, ...] | None = None,
+    pool_proxies: tuple[str, ...] | None = None,
 ) -> ProviderConfig:
     """Build shared provider configuration for one provider descriptor.
 
@@ -62,6 +56,12 @@ def build_provider_config(
     When *custom_proxies* is provided, those are aligned with the keys.
     For static providers, the proxy env var is also parsed for
     comma-separated values aligned with keys.
+
+    When *pool_proxies* is provided (non-empty), they override individual
+    proxy settings and are replicated round-robin across the keys so
+    retries can go through different IPs. The shared pool is read from
+    the managed env by the caller (factory) and passed in here to keep
+    this builder pure and unit-testable.
     """
     if custom_api_keys is not None:
         api_keys = custom_api_keys
@@ -78,7 +78,6 @@ def build_provider_config(
         proxies = tuple(parse_api_keys(proxy_raw))
 
     # Shared proxy pool overrides individual proxy settings
-    pool_proxies = _load_proxy_pool_urls()
     if pool_proxies:
         # Replicate pool proxies round-robin to match key count
         proxies = tuple(
