@@ -23,6 +23,16 @@ from free_claude_code.config.detection import (
     detect_provider_profile,
     generate_provider_id,
 )
+from free_claude_code.config.grok_oauth import (
+    cancel_login as cancel_grok_login,
+)
+from free_claude_code.config.grok_oauth import (
+    poll_login as poll_grok_login,
+)
+from free_claude_code.config.grok_oauth import (
+    start_device_auth_login,
+    upsert_grok_oauth_account,
+)
 from free_claude_code.config.model_refs import configured_chat_model_refs
 from free_claude_code.config.proxy_pool import (
     ProxyPoolEntry,
@@ -669,3 +679,64 @@ async def _check_local_provider(
             "base_url": base_url,
             "error_type": type(exc).__name__,
         }
+
+
+# ─── Grok OAuth accounts ───────────────────────────────────────────
+#
+# Drive the official `grok login --device-auth` CLI under an isolated HOME so
+# each account's ~/.grok/auth.json is independent. On approval the harvested
+# bearer is stored as one key of the `grok_oauth` custom provider (cli-chat
+# proxy), and the existing ApiKeyPool rotates across accounts on rate limits.
+
+
+@router.post("/admin/api/grok/login")
+async def grok_login(request: Request):
+    """Begin a grok device-code login flow; returns the device URL + code."""
+    require_loopback_admin(request)
+    try:
+        return await start_device_auth_login()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/admin/api/grok/login/{session_id}/status")
+async def grok_login_status(
+    session_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    services: ApiServices = Depends(get_services),
+):
+    """Poll an in-flight grok login. On completion the bearer is persisted and
+    the catalog is refreshed + a restart is requested (so the new key is live).
+    """
+
+    require_loopback_admin(request)
+    result = await poll_grok_login(session_id)
+    status = result.get("status")
+    if status == "complete":
+        token = result.get("token")
+        if not isinstance(token, str) or not token.strip():
+            raise HTTPException(status_code=500, detail="Login complete but no token")
+        persisted = upsert_grok_oauth_account(token)
+        await services.admin.refresh_catalog()
+        background_tasks.add_task(services.admin.request_restart)
+        return {
+            "status": "complete",
+            "provider_id": persisted["provider_id"],
+            "account_count": persisted["account_count"],
+        }
+    if status == "error":
+        raise HTTPException(
+            status_code=502,
+            detail=str(result.get("error", "grok login failed")),
+        )
+    return {"status": status}
+
+
+@router.post("/admin/api/grok/login/{session_id}/cancel")
+async def grok_login_cancel(session_id: str, request: Request):
+    """Cancel an in-flight grok login and clean up its temp HOME."""
+    require_loopback_admin(request)
+    return await cancel_grok_login(session_id)

@@ -62,6 +62,36 @@
               </div>
               <div id="customProviderGrid" class="provider-grid"></div>
             </section>
+            <section class="provider-strip custom-providers-section" aria-label="Grok OAuth accounts">
+              <div class="strip-header">
+                <h3>Grok Account (OAuth)</h3>
+                <button id="addGrokAccountButton" class="test-button" type="button">+ Add Grok Account</button>
+              </div>
+              <p class="hint" style="margin:0 0 12px;font-size:12px">
+                Approves in your browser via the official <code>grok login</code> device flow.
+                Each approved account becomes one key of the <code>grok_oauth</code> custom provider
+                (targets <code>cli-chat-proxy.grok.com/v1</code>); the key pool rotates across
+                accounts on rate limits.
+              </p>
+              <div id="grokLoginPanel" class="custom-provider-form" hidden>
+                <p style="margin:0 0 10px">
+                  Open this URL in a browser and approve, then enter/confirm the code if asked:
+                </p>
+                <div class="form-row">
+                  <label>Verification URL
+                    <input id="grokDeviceUrl" type="url" readonly />
+                    <a id="grokDeviceUrlLink" href="#" target="_blank" rel="noopener noreferrer" style="font-size:12px">Open in browser ↗</a>
+                  </label>
+                </div>
+                <div class="form-row">
+                  <label>User code <input id="grokUserCode" type="text" readonly style="font-size:1.4em;letter-spacing:2px" /></label>
+                </div>
+                <div class="form-actions">
+                  <button id="grokCancelLoginButton" class="secondary-button" type="button">Cancel</button>
+                </div>
+                <div id="grokLoginMessage" class="message-area"></div>
+              </div>
+            </section>
             <div
               id="providersSections"
               class="form-sections"

@@ -763,6 +763,129 @@ byId("cpCancelButton").addEventListener("click", () =>
 );
 byId("cpSaveButton").addEventListener("click", saveCustomProvider);
 
+// ─── Grok Account (OAuth) ────────────────────────────────────────
+
+const grokFormMessage = (msg, kind = "") => {
+  const area = byId("grokLoginMessage");
+  if (!area) return;
+  area.textContent = msg;
+  area.className = `message-area ${kind}`.trim();
+};
+
+let grokPollTimer = null;
+let grokPollSessionId = null;
+const GROK_POLL_INTERVAL_MS = 2000;
+const GROK_MAX_POLL_MS = 5 * 60 * 1000; // give the user 5 min to approve
+
+function stopGrokPolling() {
+  if (grokPollTimer) {
+    clearInterval(grokPollTimer);
+    grokPollTimer = null;
+  }
+}
+
+function showGrokLoginPanel(visible) {
+  byId("addGrokAccountButton").hidden = visible;
+  byId("grokLoginPanel").hidden = !visible;
+  if (!visible) {
+    byId("grokDeviceUrl").value = "";
+    byId("grokDeviceUrlLink").href = "#";
+    byId("grokUserCode").value = "";
+    grokFormMessage("");
+  }
+}
+
+async function startGrokLogin() {
+  const button = byId("addGrokAccountButton");
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = "Starting...";
+  stopGrokPolling();
+  try {
+    const result = await api("/admin/api/grok/login", { method: "POST" });
+    showGrokLoginPanel(true);
+    byId("grokDeviceUrl").value = result.device_url;
+    byId("grokDeviceUrlLink").href = result.device_url;
+    byId("grokUserCode").value = result.user_code || "";
+    grokFormMessage("Waiting for approval in your browser...", "");
+    // Best-effort auto-open; popup blockers fall back to the manual link.
+    try {
+      window.open(result.device_url, "_blank");
+    } catch {
+      // ignored
+    }
+    grokPollSessionId = result.session_id;
+    const start = Date.now();
+    grokPollTimer = setInterval(() => {
+      pollGrokLogin(grokPollSessionId, start);
+    }, GROK_POLL_INTERVAL_MS);
+  } catch (error) {
+    let detail = error.message || "Failed to start grok login";
+    if (/503/.test(detail)) {
+      detail =
+        "The 'grok' CLI was not found on the server. Install it with: curl -fsSL https://x.ai/cli/install.sh | bash (then restart the server).";
+    }
+    showMessage(`Grok login start failed: ${detail}`, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+async function pollGrokLogin(sessionId, startedAt) {
+  if (!sessionId) return;
+  if (Date.now() - startedAt > GROK_MAX_POLL_MS) {
+    stopGrokPolling();
+    showGrokLoginPanel(false);
+    showMessage("Grok login timed out waiting for approval.", "error");
+    return;
+  }
+  let result;
+  try {
+    result = await api(`/admin/api/grok/login/${encodeURIComponent(sessionId)}/status`);
+  } catch (error) {
+    // 502 = backend reported an error status; surface the detail.
+    grokFormMessage(error.message, "error");
+    return;
+  }
+  if (result.status === "complete") {
+    stopGrokPolling();
+    showGrokLoginPanel(false);
+    await loadCustomProviders();
+    showMessage(
+      `Grok account added (now ${result.account_count} account${result.account_count === 1 ? "" : "s"}). Server restarting to activate it.`,
+      "ok",
+    );
+  } else if (result.status === "pending") {
+    grokFormMessage("Waiting for approval in your browser...", "");
+  } else if (result.status === "expired" || result.status === "not_found") {
+    stopGrokPolling();
+    showGrokLoginPanel(false);
+    showMessage("Grok login session expired — please try again.", "error");
+  }
+  // status === "error" already surfaced via the 502 above.
+}
+
+async function cancelGrokLoginSession() {
+  if (!grokPollSessionId) {
+    showGrokLoginPanel(false);
+    return;
+  }
+  const sessionId = grokPollSessionId;
+  stopGrokPolling();
+  try {
+    await api(`/admin/api/grok/login/${encodeURIComponent(sessionId)}/cancel`, {
+      method: "POST",
+    });
+  } catch {
+    // best-effort
+  }
+  showGrokLoginPanel(false);
+}
+
+byId("addGrokAccountButton")?.addEventListener("click", startGrokLogin);
+byId("grokCancelLoginButton")?.addEventListener("click", cancelGrokLoginSession);
+
 // ─── Proxy Pool ────────────────────────────────────────────────
 
 const ppFormMessage = (msg, kind = "") => {

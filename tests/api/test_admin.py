@@ -1,3 +1,6 @@
+import os
+import sys
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -970,3 +973,143 @@ def test_admin_launch_url_uses_loopback_for_wildcard_host():
     settings = Settings.model_construct(host="0.0.0.0", port=8082)
 
     assert local_admin_url(settings) == "http://127.0.0.1:8082/admin"
+
+
+# ─── Grok OAuth account flow (admin routes) ─────────────────────────────────
+# These drive the real `start_device_auth_login` against a stub binary (no
+# network), so the route wiring — loopback guard, JSON shape, completion-side
+# upsert/refresh/restart, and session cleanup — is exercised end to end.
+
+
+def _write_grok_admin_stub(tmp_path: Path, monkeypatch, *, token: str) -> Path:
+    """Create an executable stub that mimics `grok login --device-auth`.
+
+    Prints the device URL + user code, sleeps long enough to stay pending,
+    then writes ``~/.grok/auth.json`` with *token* under the OIDC scope and
+    exits (so the real ``poll_login`` harvests it and reports ``complete``).
+    """
+
+    code = (
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib, sys, time\n"
+        "print('To sign in, open this URL in your browser:')\n"
+        "print()\n"
+        "print('  https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH')\n"
+        "print()\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(float(os.environ.get('GROK_STUB_SLEEP', '0.1')))\n"
+        f"tok = {token!r}\n"
+        "home = os.environ['HOME']\n"
+        "g = pathlib.Path(home) / '.grok'\n"
+        "g.mkdir(parents=True, exist_ok=True)\n"
+        "(g / 'auth.json').write_text(json.dumps({"
+        '"https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": '
+        "{'key': tok}}))\n"
+    )
+    stub = tmp_path / "grok_admin_stub.py"
+    stub.write_text(code, encoding="utf-8")
+    os.chmod(stub, 0o755)
+    monkeypatch.setenv("GROK_BIN", str(stub))
+    return stub
+
+
+def _clear_grok_sessions() -> None:
+    from free_claude_code.config import grok_oauth
+
+    grok_oauth._SESSIONS.clear()
+
+
+def test_grok_login_route_returns_device_url_and_code(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_grok_sessions()
+    _write_grok_admin_stub(tmp_path, monkeypatch, token="grok-bearer-route")
+    monkeypatch.setenv("GROK_STUB_SLEEP", "30")  # stay alive so the URL is readable
+    app = create_test_app()
+
+    response = _local_client(app).post("/admin/api/grok/login")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "session_id" in body
+    assert body["device_url"].startswith(
+        "https://accounts.x.ai/oauth2/device?user_code="
+    )
+    assert body["user_code"] == "ABCD-EFGH"
+
+    # Still pending (the stub is sleeping) before we cancel.
+    status = _local_client(app).get(
+        f"/admin/api/grok/login/{body['session_id']}/status"
+    )
+    assert status.json()["status"] == "pending"
+
+    cancel = _local_client(app).post(
+        f"/admin/api/grok/login/{body['session_id']}/cancel"
+    )
+    assert cancel.json() == {"status": "cancelled", "ok": True}
+
+
+def test_grok_login_route_is_loopback_only(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_grok_sessions()
+    _write_grok_admin_stub(tmp_path, monkeypatch, token="grok-bearer")
+    monkeypatch.setenv("GROK_STUB_SLEEP", "30")
+    app = create_test_app()
+
+    remote = TestClient(app, client=("203.0.113.10", 50000))
+    assert remote.post("/admin/api/grok/login").status_code == 403
+
+
+def test_grok_login_status_completes_persists_to_grok_oauth(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_grok_sessions()
+    _write_grok_admin_stub(tmp_path, monkeypatch, token="grok-real-route-tok")
+    monkeypatch.setenv("GROK_STUB_SLEEP", "0.05")
+    restarts: list[str] = []
+    app = create_test_app(restart_callback=lambda: restarts.append("restart"))
+    # refresh_catalog rebuilds real providers; stub it so the test is hermetic.
+    monkeypatch.setattr(app.state.services.admin, "refresh_catalog", AsyncMock())
+    client = _local_client(app)
+
+    start = client.post("/admin/api/grok/login").json()
+    session_id = start["session_id"]
+
+    status = None
+    for _ in range(100):
+        status = client.get(f"/admin/api/grok/login/{session_id}/status").json()
+        if status["status"] != "pending":
+            break
+        time.sleep(0.05)
+
+    assert status["status"] == "complete"
+    assert status == {
+        "status": "complete",
+        "provider_id": "grok_oauth",
+        "account_count": 1,
+    }
+    assert restarts == ["restart"]  # completion schedules a restart
+
+    # The grok_oauth custom provider now appears with one key.
+    providers = client.get("/admin/api/custom-providers").json()["providers"]
+    grok = next(p for p in providers if p["provider_id"] == "grok_oauth")
+    assert grok["api_key_count"] == 1
+    assert grok["base_url"] == "https://cli-chat-proxy.grok.com/v1"
+
+
+def test_grok_login_status_unknown_session_is_not_found(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_grok_sessions()
+    app = create_test_app()
+
+    status = _local_client(app).get("/admin/api/grok/login/does-not-exist/status")
+    assert status.status_code == 200
+    assert status.json() == {"status": "not_found"}
+
+
+def test_grok_login_cancel_unknown_session_is_not_found(monkeypatch, tmp_path):
+    _set_home(monkeypatch, tmp_path)
+    _clear_grok_sessions()
+    app = create_test_app()
+
+    cancel = _local_client(app).post("/admin/api/grok/login/does-not-exist/cancel")
+    assert cancel.status_code == 200
+    assert cancel.json() == {"status": "not_found"}
