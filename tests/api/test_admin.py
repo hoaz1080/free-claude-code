@@ -382,6 +382,48 @@ def test_admin_apply_writes_complete_managed_env_and_masks_preview(
     }
 
 
+def test_admin_apply_preserves_non_manifest_keys_like_proxy_pool(monkeypatch, tmp_path):
+    """Apply rewrites the manifest fields but must not delete proxy pool /
+    custom provider keys owned by other features."""
+    _set_home(monkeypatch, tmp_path)
+    _clear_process_config(monkeypatch)
+    env_file = tmp_path / ".fcc" / ".env"
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    proxy_line = (
+        'FCC_PROXY_POOL="[{\\"url\\":\\"socks5://174.77.111.198:49547\\",'
+        '\\"label\\":\\"home\\",\\"healthy\\":null,\\"last_tested\\":0.0}]"'
+    )
+    custom_line = (
+        'FCC_CUSTOM_PROVIDERS="[{\\"provider_id\\":\\"hi\\",'
+        '\\"display_name\\":\\"grok\\",\\"base_url\\":\\"https://api.x.ai/v1\\",'
+        '\\"api_keys\\":[\\"xai-secret\\"],\\"proxies\\":[],'
+        '\\"detected_profile\\":null}]"'
+    )
+    env_file.write_text(
+        "EXISTING_OTHER=value\n" + proxy_line + "\n" + custom_line + "\n",
+        encoding="utf-8",
+    )
+
+    app = create_test_app()
+    response = _local_client(app).post(
+        "/admin/api/config/apply",
+        json={"values": {"MODEL": "open_router/test-model"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["applied"] is True
+    text = env_file.read_text(encoding="utf-8")
+    assert proxy_line in text, "FCC_PROXY_POOL line must survive an Apply rewrite"
+    assert custom_line in text, "FCC_CUSTOM_PROVIDERS line must survive an Apply"
+    # A non-manifest, non-allowlisted key is pruned (pre-existing behavior): the
+    # managed file is rendered from the admin manifest, not a free-form env file.
+    assert "EXISTING_OTHER=value" not in text
+    # And the manifest write still happened.
+    assert "MODEL=open_router/test-model" in text
+    # The masked preview must NOT leak the custom provider's API key.
+    assert "xai-secret" not in response.json()["env_preview"]
+
+
 def test_admin_apply_writes_fireworks_key_and_masks_preview(monkeypatch, tmp_path):
     _set_home(monkeypatch, tmp_path)
     _clear_process_config(monkeypatch)

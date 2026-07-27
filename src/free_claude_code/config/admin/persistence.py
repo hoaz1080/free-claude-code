@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from free_claude_code.config.custom_providers import CUSTOM_PROVIDERS_ENV_KEY
 from free_claude_code.config.paths import managed_env_path
+from free_claude_code.config.proxy_pool import FCC_PROXY_POOL_KEY
 from free_claude_code.config.settings import Settings
 
 from .manifest import FIELD_BY_KEY, FIELDS, SECTIONS, ConfigFieldSpec
@@ -160,6 +162,40 @@ def prepare_admin_update(updates: Mapping[str, Any]) -> PreparedAdminUpdate:
     )
 
 
+PRESERVED_MANAGED_KEYS: frozenset[str] = frozenset(
+    {FCC_PROXY_POOL_KEY, CUSTOM_PROVIDERS_ENV_KEY}
+)
+"""Managed keys owned by other features that an admin rewrite must keep.
+
+The admin panel renders only its own field manifest. Two other managed keys
+live in the same file and are owned elsewhere: ``FCC_PROXY_POOL`` (the proxy
+pool) and ``FCC_CUSTOM_PROVIDERS`` (custom providers). Without an allowlist a
+config rewrite would either delete those keys on every "Apply" (the proxy
+disappears bug) or, conversely, resurrect stale keys the admin deliberately
+dropped (e.g. an obsolete ``ZAI_BASE_URL``). Only these two are carried over;
+their original lines are copied verbatim so the owning feature's dotenv
+escaping survives untouched. A new managed key added elsewhere joins this set.
+"""
+
+
+def preserved_extra_lines(content: str) -> list[str]:
+    """Return the preserved managed-key lines to carry across a config rewrite."""
+
+    if not content:
+        return []
+    seen: set[str] = set()
+    extras: list[str] = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.partition("=")[0].strip()
+        if key in PRESERVED_MANAGED_KEYS and key not in seen:
+            seen.add(key)
+            extras.append(line)
+    return extras
+
+
 def commit_prepared_admin_update(prepared: PreparedAdminUpdate) -> dict[str, Any]:
     """Atomically persist a previously validated Admin update."""
 
@@ -169,11 +205,21 @@ def commit_prepared_admin_update(prepared: PreparedAdminUpdate) -> dict[str, Any
     path = prepared.path
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(path.suffix + ".tmp")
-    try:
-        temp_path.write_text(
-            render_env_file(prepared.target_values),
-            encoding="utf-8",
+    body = render_env_file(prepared.target_values)
+    extras = (
+        preserved_extra_lines(path.read_text(encoding="utf-8"))
+        if path.is_file()
+        else []
+    )
+    if extras:
+        body = (
+            body.rstrip("\n")
+            + "\n\n# Preserved managed-feature keys (not edited here).\n"
+            + "\n".join(extras)
+            + "\n"
         )
+    try:
+        temp_path.write_text(body, encoding="utf-8")
         os.replace(temp_path, path)
     finally:
         temp_path.unlink(missing_ok=True)
