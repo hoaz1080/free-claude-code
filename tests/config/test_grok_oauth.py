@@ -14,10 +14,12 @@ from free_claude_code.config.custom_providers import (
 )
 from free_claude_code.config.grok_oauth import (
     GROK_OAUTH_BASE_URL,
+    GROK_OAUTH_DEFAULT_HEADERS,
     GROK_OAUTH_PROVIDER_ID,
     GROK_OIDC_SCOPE,
     cancel_login,
     harvest_token_from_text,
+    mask_proxy_url,
     poll_login,
     start_device_auth_login,
     upsert_grok_oauth_account,
@@ -33,7 +35,36 @@ def _patch_env(tmp_path: Path, monkeypatch) -> Path:
         "free_claude_code.config.custom_providers.managed_env_path",
         lambda: env_path,
     )
+    # The proxy pool reads paths.managed_env_path fresh each call — redirect it
+    # to the same tmp file so login-side proxy rotation is hermetic and reads
+    # whatever FCC_PROXY_POOL line the test seeds into env_path.
+    monkeypatch.setattr(
+        "free_claude_code.config.paths.managed_env_path",
+        lambda: env_path,
+    )
     return env_path
+
+
+def _seed_proxy_pool(env_path: Path, urls: tuple[str, ...]) -> None:
+    """Write a FCC_PROXY_POOL line of healthy proxies into the managed env."""
+    import json as _json
+
+    entries = [
+        {"url": u, "label": "", "healthy": True, "last_tested": 0.0} for u in urls
+    ]
+    value = _json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    line = f'FCC_PROXY_POOL="{escaped}"\n'
+    existing = env_path.read_text(encoding="utf-8") if env_path.is_file() else ""
+    if "FCC_PROXY_POOL=" in existing:
+        lines = existing.splitlines()
+        for i, existing_line in enumerate(lines):
+            if existing_line.strip().startswith("FCC_PROXY_POOL="):
+                lines[i] = line.rstrip("\n")
+                break
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    else:
+        env_path.write_text((existing if existing else "") + line, encoding="utf-8")
 
 
 def _write_grok_stub(tmp_path: Path, monkeypatch) -> Path:
@@ -231,3 +262,154 @@ class TestDeviceAuthLoginFlow:
         _clear_sessions()
         status = await poll_login("does-not-exist")
         assert status["status"] == "not_found"
+
+
+class TestGrokClientHeaders:
+    def test_default_headers_match_official_cli(self) -> None:
+        names = {h[0] for h in GROK_OAUTH_DEFAULT_HEADERS}
+        assert names == {"x-grok-client-version", "x-grok-client-surface"}
+
+    def test_upsert_stamps_headers_on_create(self, tmp_path, monkeypatch) -> None:
+        _patch_env(tmp_path, monkeypatch)
+        upsert_grok_oauth_account("tok-1")
+        defn = load_custom_providers_from_managed_env()[GROK_OAUTH_PROVIDER_ID]
+        assert defn.default_headers == GROK_OAUTH_DEFAULT_HEADERS
+
+    def test_upsert_preserves_headers_on_re_add(self, tmp_path, monkeypatch) -> None:
+        _patch_env(tmp_path, monkeypatch)
+        upsert_grok_oauth_account("tok-1")
+        upsert_grok_oauth_account("tok-1")  # duplicate → no-op re-approval
+        defn = load_custom_providers_from_managed_env()[GROK_OAUTH_PROVIDER_ID]
+        assert defn.default_headers == GROK_OAUTH_DEFAULT_HEADERS
+        assert defn.api_keys == ("tok-1",)
+
+    def test_upsert_stamps_headers_on_append(self, tmp_path, monkeypatch) -> None:
+        _patch_env(tmp_path, monkeypatch)
+        upsert_grok_oauth_account("tok-1")
+        upsert_grok_oauth_account("tok-2")
+        defn = load_custom_providers_from_managed_env()[GROK_OAUTH_PROVIDER_ID]
+        assert defn.api_keys == ("tok-1", "tok-2")
+        assert defn.default_headers == GROK_OAUTH_DEFAULT_HEADERS
+
+    def test_backfill_headers_for_legacy_definition_without_them(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # A grok_oauth entry persisted before headers existed has empty headers
+        # in the file, but the dynamic catalog must serve the grok headers so
+        # pre-existing accounts survive the 426 gate without re-adding.
+        env_path = _patch_env(tmp_path, monkeypatch)
+        env_path.write_text(
+            'FCC_CUSTOM_PROVIDERS="[{\\"provider_id\\":\\"grok_oauth\\",'
+            '\\"display_name\\":\\"Grok (OAuth)\\",'
+            '\\"base_url\\":\\"https://cli-chat-proxy.grok.com/v1\\",'
+            '\\"api_keys\\":[\\"legacy-tok\\"],\\"proxies\\":[],'
+            '\\"detected_profile\\":null}]"\n'
+        )
+        from free_claude_code.config.dynamic_catalog import DynamicProviderCatalog
+
+        catalog = DynamicProviderCatalog()
+        defn = catalog.get_custom_definition(GROK_OAUTH_PROVIDER_ID)
+        assert defn is not None
+        assert defn.default_headers == GROK_OAUTH_DEFAULT_HEADERS
+        assert defn.api_keys == ("legacy-tok",)
+
+
+class TestMaskProxyUrl:
+    def test_masks_password(self) -> None:
+        assert mask_proxy_url("http://user:secret@host:8080") == "http://****@host:8080"
+
+    def test_no_credentials_unchanged(self) -> None:
+        assert mask_proxy_url("http://host:8080") == "http://host:8080"
+
+    def test_socks5_masks(self) -> None:
+        assert (
+            mask_proxy_url("socks5://u:p@1.2.3.4:1080") == "socks5://****@1.2.3.4:1080"
+        )
+
+    def test_empty_unchanged(self) -> None:
+        assert mask_proxy_url("") == ""
+
+
+class TestLoginProxySelection:
+    def test_empty_pool_returns_empty(self, tmp_path, monkeypatch) -> None:
+        _patch_env(tmp_path, monkeypatch)
+        assert grok_oauth._select_login_proxy() == ""
+
+    def test_picks_proxy_zero_for_first_account(self, tmp_path, monkeypatch) -> None:
+        env_path = _patch_env(tmp_path, monkeypatch)
+        _seed_proxy_pool(env_path, ("http://a:8080", "http://b:8080", "http://c:8080"))
+        assert grok_oauth._select_login_proxy() == "http://a:8080"
+
+    def test_rotates_per_account_and_wraps(self, tmp_path, monkeypatch) -> None:
+        env_path = _patch_env(tmp_path, monkeypatch)
+        _seed_proxy_pool(env_path, ("http://a:8080", "http://b:8080", "http://c:8080"))
+        # Account 0 (none yet) -> proxy[0]
+        assert grok_oauth._select_login_proxy() == "http://a:8080"
+        upsert_grok_oauth_account("k0")
+        assert grok_oauth._select_login_proxy() == "http://b:8080"  # account 1
+        upsert_grok_oauth_account("k1")
+        assert grok_oauth._select_login_proxy() == "http://c:8080"  # account 2
+        upsert_grok_oauth_account("k2")
+        assert grok_oauth._select_login_proxy() == "http://a:8080"  # wraps to % len
+
+
+class TestLoginProxyEnvInjection:
+    @pytest.mark.asyncio
+    async def test_login_injects_pool_proxy_env(self, tmp_path, monkeypatch) -> None:
+        _clear_sessions()
+        env_path = _patch_env(tmp_path, monkeypatch)
+        _seed_proxy_pool(env_path, ("http://a:8080", "http://b:8080"))
+        _write_grok_stub(tmp_path, monkeypatch)
+        monkeypatch.setenv("GROK_STUB_SLEEP", "30")  # keep alive for assertions
+
+        captured: list[dict | None] = []
+        orig_exec = asyncio.create_subprocess_exec
+
+        async def spy_exec(*args, **kwargs):
+            captured.append(kwargs.get("env"))
+            return await orig_exec(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spy_exec)
+
+        await start_device_auth_login()
+
+        # No grok accounts yet -> login uses proxy[0].
+        assert captured
+        login_env = captured[-1]
+        assert login_env is not None
+        assert login_env["HTTPS_PROXY"] == "http://a:8080"
+        assert login_env["HTTP_PROXY"] == "http://a:8080"
+        assert login_env["ALL_PROXY"] == "http://a:8080"
+        # Clean up the running child so the temp home is released.
+        for s in list(grok_oauth._SESSIONS.values()):
+            grok_oauth._cleanup_session(s)
+        assert grok_oauth._SESSIONS == {}
+
+    @pytest.mark.asyncio
+    async def test_login_without_pool_going_direct(self, tmp_path, monkeypatch) -> None:
+        _clear_sessions()
+        _patch_env(tmp_path, monkeypatch)  # no FCC_PROXY_POOL seeded
+        _write_grok_stub(tmp_path, monkeypatch)
+        monkeypatch.setenv("GROK_STUB_SLEEP", "30")
+
+        captured: list[dict | None] = []
+        orig_exec = asyncio.create_subprocess_exec
+
+        async def spy_exec(*args, **kwargs):
+            captured.append(kwargs.get("env"))
+            return await orig_exec(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spy_exec)
+
+        await start_device_auth_login()
+
+        assert captured
+        login_env = captured[-1]
+        assert login_env is not None
+        # No pool proxy injected: only HOME differs from the process env.
+        assert grok_oauth._select_login_proxy() == ""
+        for var in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+            assert login_env.get(var, os.environ.get(var)) == os.environ.get(var)
+        for s in list(grok_oauth._SESSIONS.values()):
+            grok_oauth._cleanup_session(s)
+        assert grok_oauth._SESSIONS == {}

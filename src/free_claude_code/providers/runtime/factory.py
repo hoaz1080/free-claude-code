@@ -217,4 +217,11 @@ def create_provider(
             return factory(config, settings, rate_limiter)
 
     profile_id = _select_profile_id(provider_id, custom_def, is_custom)
-    return create_openai_chat_provider(profile_id, config, rate_limiter)
+    default_headers = (
+        dict(custom_def.default_headers)
+        if custom_def is not None and is_custom and custom_def.default_headers
+        else None
+    )
+    return create_openai_chat_provider(
+        profile_id, config, rate_limiter, default_headers=default_headers
+    )

@@ -43,6 +43,26 @@ GROK_OAUTH_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
 # scope is the bearer used against the chat proxy.
 GROK_OIDC_SCOPE = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"
 
+# ``cli-chat-proxy.grok.com`` gate-checks the requesting client's version via
+# these headers (extracted from the official `grok` binary). Without them the
+# proxy replies HTTP 426 "Your Grok CLI version (none) is outdated". The
+# ``surface`` matches the grok-build client; the version tracks the installed
+# CLI so xAI's gate accepts it. Mirrored onto each grok_oauth key via
+# ``default_headers`` so the generic OpenAI provider sends them per request.
+GROK_CLI_VERSION = "0.2.112"
+GROK_CLIENT_SURFACE = "grok-build"
+GROK_OAUTH_DEFAULT_HEADERS: tuple[tuple[str, str], ...] = (
+    ("x-grok-client-version", GROK_CLI_VERSION),
+    ("x-grok-client-surface", GROK_CLIENT_SURFACE),
+)
+
+# Env vars the grok CLI (a Rust/reqwest client) honours for outbound proxying.
+# Setting all three covers http(s) and socks5 outbound from both the OAuth
+# device flow and any CLI telemetry during login. The login side rotates one
+# pool proxy per *new account* (round-robin by current account count), aligned
+# with the runtime side's per-key proxy assignment (config.py ``i % len``).
+_PROXY_ENV_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")
+
 # Sessions auto-expire if not touched within this many seconds (user walked
 # away without approving in the browser).
 _SESSION_TTL_SECONDS = 600
@@ -50,6 +70,21 @@ _SESSION_TTL_SECONDS = 600
 # Override the path to the grok binary (set ``GROK_BIN`` in the environment,
 # mainly for tests using a stub). When unset we resolve the real install.
 _GROK_BIN_ENV = "GROK_BIN"
+
+
+def mask_proxy_url(proxy_url: str) -> str:
+    """Mask the password in a proxy URL for safe logging."""
+
+    if not proxy_url or "@" not in proxy_url:
+        return proxy_url
+    scheme_split = proxy_url.split("://", 1)
+    if len(scheme_split) != 2:
+        return proxy_url
+    scheme, rest = scheme_split
+    creds, _, host = rest.rpartition("@")
+    if not creds or not host:
+        return proxy_url
+    return f"{scheme}://****@{host}"
 
 
 def _resolve_grok_bin() -> str:
@@ -153,6 +188,27 @@ async def _read_login_output(proc: asyncio.subprocess.Process) -> tuple[str, str
     return device_url, user_code
 
 
+def _select_login_proxy() -> str:
+    """Pick the shared-pool proxy for the *next* grok account's provisioning.
+
+    Rotates one proxy per new account, round-robin by current account count, so
+    ``account N`` logs in through ``pool[N % len(pool)]`` — the same proxy the
+    runtime side assigns to that account's key (``config.py: pool_proxies[i %
+    len]``). Login and runtime traffic for a given account therefore share an
+    IP. Returns ``""`` when the shared pool is empty (login goes direct).
+    """
+
+    from free_claude_code.config.proxy_pool import load_healthy_proxy_urls
+
+    pool = load_healthy_proxy_urls()
+    if not pool:
+        return ""
+    definitions = load_custom_providers_from_managed_env()
+    existing = definitions.get(GROK_OAUTH_PROVIDER_ID)
+    index = len(existing.api_keys) if existing is not None else 0
+    return pool[index % len(pool)]
+
+
 async def start_device_auth_login() -> dict[str, str]:
     """Start a ``grok login --device-auth`` flow and return its device URL/code.
 
@@ -165,6 +221,11 @@ async def start_device_auth_login() -> dict[str, str]:
     work_home = _new_work_home()
     session_id = uuid.uuid4().hex
     env = {**os.environ, "HOME": str(work_home)}
+    login_proxy = _select_login_proxy()
+    if login_proxy:
+        for var in _PROXY_ENV_VARS:
+            env[var] = login_proxy
+        logger.info("Routing grok login through {}", mask_proxy_url(login_proxy))
 
     proc = await asyncio.create_subprocess_exec(
         grok_bin,
@@ -313,6 +374,11 @@ def upsert_grok_oauth_account(token: str) -> dict[str, str | int]:
 
     definitions = load_custom_providers_from_managed_env()
     existing = definitions.get(GROK_OAUTH_PROVIDER_ID)
+    # The cli-chat-proxy server gate-checks the grok client headers; stamp them
+    # on every (re)write so the provider sends them per request and survives 426.
+    headers = existing.default_headers if existing is not None else ()
+    if not headers:
+        headers = GROK_OAUTH_DEFAULT_HEADERS
     if existing is None:
         definition = CustomProviderDefinition(
             provider_id=GROK_OAUTH_PROVIDER_ID,
@@ -321,11 +387,23 @@ def upsert_grok_oauth_account(token: str) -> dict[str, str | int]:
             api_keys=(token,),
             proxies=(),
             detected_profile=None,
+            default_headers=headers,
         )
         definitions[GROK_OAUTH_PROVIDER_ID] = definition
     else:
         if token in existing.api_keys:
             logger.info("Grok OAuth token already present; not re-adding")
+            # Still backfill headers on a no-op re-approval if they were absent.
+            if not existing.default_headers:
+                definitions[GROK_OAUTH_PROVIDER_ID] = CustomProviderDefinition(
+                    provider_id=existing.provider_id,
+                    display_name=existing.display_name or "Grok (OAuth)",
+                    base_url=existing.base_url or GROK_OAUTH_BASE_URL,
+                    api_keys=existing.api_keys,
+                    proxies=existing.proxies,
+                    detected_profile=existing.detected_profile,
+                    default_headers=headers,
+                )
         else:
             definitions[GROK_OAUTH_PROVIDER_ID] = CustomProviderDefinition(
                 provider_id=existing.provider_id,
@@ -334,6 +412,7 @@ def upsert_grok_oauth_account(token: str) -> dict[str, str | int]:
                 api_keys=(*existing.api_keys, token),
                 proxies=existing.proxies,
                 detected_profile=existing.detected_profile,
+                default_headers=headers,
             )
     save_custom_providers_to_managed_env(definitions)
 

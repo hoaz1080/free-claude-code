@@ -6,6 +6,10 @@ from free_claude_code.config.custom_providers import (
     CustomProviderDefinition,
     load_custom_providers_from_managed_env,
 )
+from free_claude_code.config.grok_oauth import (
+    GROK_OAUTH_DEFAULT_HEADERS,
+    GROK_OAUTH_PROVIDER_ID,
+)
 from free_claude_code.config.provider_catalog import (
     PROVIDER_CATALOG,
     SUPPORTED_PROVIDER_IDS,
@@ -27,6 +31,21 @@ class DynamicProviderCatalog:
 
     def _reload(self) -> None:
         self._custom = load_custom_providers_from_managed_env()
+        # Backfill the grok client headers for any grok_oauth definition that
+        # predates them (so pre-existing accounts work after upgrade, and an
+        # admin edit that rebuilds the definition without them is still served
+        # the headers). In-memory only — does not churn the env file.
+        grok = self._custom.get(GROK_OAUTH_PROVIDER_ID)
+        if grok is not None and not grok.default_headers:
+            self._custom[GROK_OAUTH_PROVIDER_ID] = CustomProviderDefinition(
+                provider_id=grok.provider_id,
+                display_name=grok.display_name,
+                base_url=grok.base_url,
+                api_keys=grok.api_keys,
+                proxies=grok.proxies,
+                detected_profile=grok.detected_profile,
+                default_headers=GROK_OAUTH_DEFAULT_HEADERS,
+            )
         self._custom_descriptors = {
             pid: d.to_descriptor() for pid, d in self._custom.items()
         }

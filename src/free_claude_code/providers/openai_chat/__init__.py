@@ -1,5 +1,7 @@
 """OpenAI-compatible provider family."""
 
+from collections.abc import Mapping
+
 from free_claude_code.providers.base import ProviderConfig
 from free_claude_code.providers.rate_limit import ProviderRateLimiter
 
@@ -15,8 +17,15 @@ def create_openai_chat_provider(
     provider_id: str,
     config: ProviderConfig,
     rate_limiter: ProviderRateLimiter,
+    *,
+    default_headers: Mapping[str, str] | None = None,
 ) -> OpenAIChatProvider:
-    """Construct one profile-driven provider."""
+    """Construct one profile-driven provider.
+
+    ``default_headers`` are stamped on every request to this provider (e.g.
+    the ``x-grok-client-*`` headers the official grok CLI sends, which the
+    cli-chat-proxy server gate-checks). ``None`` means no extra headers.
+    """
     profile = OPENAI_CHAT_PROFILES.get(provider_id)
     if profile is None:
         raise KeyError(f"No declarative OpenAI-chat profile for {provider_id!r}")
@@ -24,6 +33,7 @@ def create_openai_chat_provider(
         config,
         profile=profile,
         rate_limiter=rate_limiter,
+        default_headers=default_headers,
     )
 
 

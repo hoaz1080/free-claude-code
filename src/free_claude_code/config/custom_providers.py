@@ -33,6 +33,11 @@ class CustomProviderDefinition:
     detected_profile: str | None = (
         None  # profile id from detection, or None for generic
     )
+    # Static default headers sent on every request to this provider, e.g.
+    # the ``x-grok-client-*`` headers the official grok CLI sends. Stored as
+    # pairs (not a mapping) so the frozen dataclass stays hashable-lightweight;
+    # the provider factory flattens to a dict at construction time.
+    default_headers: tuple[tuple[str, str], ...] = ()
 
     def to_descriptor(self) -> ProviderDescriptor:
         """Convert to a catalog-compatible descriptor."""
@@ -142,6 +147,23 @@ def _parse_custom_providers_json(
         else:
             proxies = ()
 
+        default_headers: tuple[tuple[str, str], ...] = ()
+        headers_raw = item.get("default_headers")
+        if isinstance(headers_raw, list):
+            collected: list[tuple[str, str]] = []
+            for pair in headers_raw:
+                if (
+                    isinstance(pair, (list, tuple))
+                    and len(pair) == 2
+                    and isinstance(pair[0], str)
+                    and isinstance(pair[1], str)
+                ):
+                    name, value = pair[0].strip(), pair[1]
+                    if name:
+                        collected.append((name, value))
+            if collected:
+                default_headers = tuple(collected)
+
         provider_id = item.get("provider_id", "").strip() or generate_provider_id(
             base_url
         )
@@ -160,6 +182,7 @@ def _parse_custom_providers_json(
             api_keys=api_keys,
             proxies=proxies,
             detected_profile=detected_profile,
+            default_headers=default_headers,
         )
 
     return result
@@ -189,6 +212,7 @@ def save_custom_providers_to_managed_env(
             "api_keys": list(d.api_keys),
             "proxies": list(d.proxies),
             "detected_profile": d.detected_profile,
+            "default_headers": [list(pair) for pair in d.default_headers],
         }
         for d in definitions.values()
     ]
