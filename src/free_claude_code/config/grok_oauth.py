@@ -209,23 +209,50 @@ def _select_login_proxy() -> str:
     return pool[index % len(pool)]
 
 
-async def start_device_auth_login() -> dict[str, str]:
-    """Start a ``grok login --device-auth`` flow and return its device URL/code.
+def _login_proxy_candidates() -> list[str]:
+    """Ordered candidate proxies for one login, for resilient retry.
 
-    Returns ``{"session_id", "device_url", "user_code"}``. Raises
-    ``FileNotFoundError`` if grok isn't installed or ``RuntimeError`` if the
-    CLI failed to produce a device URL/user code.
+    Starts at the per-account rotation index (``pool[index % len]`` — the
+    primary choice ``_select_login_proxy`` returns) and walks forward, wrapping
+    around, capped at 3 distinct pool entries. A single direct (``""``)
+    attempt is appended last so a login still succeeds when every pool proxy
+    is dead or unreachable (the host can often reach ``auth.x.ai`` directly
+    even with a bad pool). When the pool is empty, only a direct attempt is
+    made. ``""`` denotes "no proxy / go direct".
+    """
+    from free_claude_code.config.proxy_pool import load_healthy_proxy_urls
+
+    pool = load_healthy_proxy_urls()
+    if not pool:
+        return [""]
+    definitions = load_custom_providers_from_managed_env()
+    existing = definitions.get(GROK_OAUTH_PROVIDER_ID)
+    index = len(existing.api_keys) if existing is not None else 0
+    n = len(pool)
+    candidates: list[str] = []
+    for i in range(min(3, n)):
+        url = pool[(index + i) % n]
+        if url and url not in candidates:
+            candidates.append(url)
+    candidates.append("")  # direct fallback
+    return candidates
+
+
+async def _attempt_login(
+    grok_bin: str, work_home: Path, proxy_url: str
+) -> GrokLoginSession | None:
+    """Spawn one ``grok login --device-auth`` under *proxy_url* (``""``=direct).
+
+    Returns the populated session when the CLI prints a device verification
+    URL, or ``None`` (after cleaning up the child and temp home) when it does
+    not. The session is left unregistered; the caller decides whether to keep
+    it. A fresh ``work_home`` per attempt keeps each login isolated.
     """
 
-    grok_bin = _resolve_grok_bin()
-    work_home = _new_work_home()
-    session_id = uuid.uuid4().hex
     env = {**os.environ, "HOME": str(work_home)}
-    login_proxy = _select_login_proxy()
-    if login_proxy:
+    if proxy_url:
         for var in _PROXY_ENV_VARS:
-            env[var] = login_proxy
-        logger.info("Routing grok login through {}", mask_proxy_url(login_proxy))
+            env[var] = proxy_url
 
     proc = await asyncio.create_subprocess_exec(
         grok_bin,
@@ -237,35 +264,66 @@ async def start_device_auth_login() -> dict[str, str]:
     )
 
     session = GrokLoginSession(
-        session_id=session_id,
+        session_id=uuid.uuid4().hex,
         work_home=work_home,
         proc=proc,
         device_url="",
         user_code="",
     )
-    _SESSIONS[session_id] = session
-
     try:
         device_url, user_code = await _read_login_output(proc)
     except Exception:
         _cleanup_session(session)
-        raise
-
-    session.device_url = device_url
-    session.user_code = user_code
-
+        return None
     if not device_url:
         _cleanup_session(session)
-        raise RuntimeError(
-            "grok login did not produce a device verification URL. "
-            "Check that the grok CLI is installed and up to date."
-        )
+        return None
+    session.device_url = device_url
+    session.user_code = user_code
+    return session
 
-    return {
-        "session_id": session_id,
-        "device_url": device_url,
-        "user_code": user_code,
-    }
+
+async def start_device_auth_login() -> dict[str, str]:
+    """Start a ``grok login --device-auth`` flow and return its device URL/code.
+
+    Spawns the CLI under candidate proxies in turn (per-account rotation
+    index first, then a couple of onward rotations, then a direct fallback),
+    keeping the first attempt that prints a device URL. This makes login
+    resilient to a single dead pool proxy: previously one bad proxy made the
+    CLI print no URL, raising — and surfacing as a 502.
+
+    Returns ``{"session_id", "device_url", "user_code"}``. Raises
+    ``FileNotFoundError`` if grok isn't installed or ``RuntimeError`` if every
+    candidate failed to produce a device URL.
+    """
+
+    grok_bin = _resolve_grok_bin()
+    for proxy_url in _login_proxy_candidates():
+        work_home = _new_work_home()
+        session = await _attempt_login(grok_bin, work_home, proxy_url)
+        if session is None:
+            logger.warning(
+                "grok login produced no device URL via {}; trying next candidate",
+                mask_proxy_url(proxy_url) if proxy_url else "direct",
+            )
+            continue
+        _SESSIONS[session.session_id] = session
+        if proxy_url:
+            logger.info("Routing grok login through {}", mask_proxy_url(proxy_url))
+        else:
+            logger.info("Grok login going direct (no proxy)")
+        return {
+            "session_id": session.session_id,
+            "device_url": session.device_url,
+            "user_code": session.user_code,
+        }
+
+    raise RuntimeError(
+        "grok login did not produce a device verification URL through any "
+        "candidate proxy (or direct). Prune dead proxies via Admin → Proxy "
+        "Pool → Test All, then retry — the health check now tests that a "
+        "proxy can actually tunnel to auth.x.ai, not just that it is listening."
+    )
 
 
 def harvest_token_from_text(auth_json_text: str) -> str | None:

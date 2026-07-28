@@ -413,3 +413,155 @@ class TestLoginProxyEnvInjection:
         for s in list(grok_oauth._SESSIONS.values()):
             grok_oauth._cleanup_session(s)
         assert grok_oauth._SESSIONS == {}
+
+
+def _write_grok_retry_stub(tmp_path: Path, monkeypatch) -> Path:
+    """Stub that fails (no URL) when given a "dead" proxy, succeeds otherwise.
+
+    Mirrors a real grok login whose selected proxy can't tunnel: it exits
+    nonzero without printing a device URL. ``GROK_STUB_DEAD`` (comma list)
+    names the proxy URLs (or ``""`` for the direct attempt) that must fail.
+    Any candidate not in the dead list prints the device URL and stays alive.
+    """
+    code = (
+        f"#!{sys.executable}\n"
+        "import os, sys, time\n"
+        "dead = set(p.strip() for p in os.environ.get('GROK_STUB_DEAD','').split(','))\n"
+        "proxy = (os.environ.get('HTTPS_PROXY') or os.environ.get('HTTP_PROXY') "
+        "or os.environ.get('ALL_PROXY') or '')\n"
+        "key = proxy if proxy else 'direct'\n"
+        "if key in dead:\n"
+        "    sys.exit(1)\n"  # simulate the 502 cause: no device URL
+        "print('To sign in, open this URL in your browser:')\n"
+        "print()\n"
+        "print('  https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH')\n"
+        "print()\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(float(os.environ.get('GROK_STUB_SLEEP','30')))\n"
+    )
+    stub = tmp_path / "grok_retry_stub.py"
+    stub.write_text(code, encoding="utf-8")
+    os.chmod(stub, 0o755)
+    monkeypatch.setenv("GROK_BIN", str(stub))
+    return stub
+
+
+def _captured_proxies(captured: list[dict | None]) -> list[str]:
+    """Extract the per-attempt assigned proxy URL (or '' for direct)."""
+    out: list[str] = []
+    for env in captured:
+        if env is None:
+            out.append("")
+            continue
+        out.append(
+            env.get("HTTPS_PROXY")
+            or env.get("HTTP_PROXY")
+            or env.get("ALL_PROXY")
+            or ""
+        )
+    return out
+
+
+class TestLoginProxyRetry:
+    """start_device_auth_login rotates candidates instead of 502-ing on a bad proxy."""
+
+    @pytest.mark.asyncio
+    async def test_dead_first_proxy_rotates_to_next(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        _clear_sessions()
+        env_path = _patch_env(tmp_path, monkeypatch)
+        _seed_proxy_pool(env_path, ("http://a:8080", "http://b:8080"))
+        _write_grok_retry_stub(tmp_path, monkeypatch)
+        monkeypatch.setenv("GROK_STUB_DEAD", "http://a:8080")
+        monkeypatch.setenv("GROK_STUB_SLEEP", "30")
+
+        captured: list[dict | None] = []
+        orig_exec = asyncio.create_subprocess_exec
+
+        async def spy_exec(*args, **kwargs):
+            captured.append(kwargs.get("env"))
+            return await orig_exec(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spy_exec)
+
+        result = await start_device_auth_login()
+        assert result["device_url"].startswith("https://accounts.x.ai/oauth2/device")
+
+        # Tried the dead proxy a first, then succeeded via b.
+        tried = _captured_proxies(captured)
+        assert tried[0] == "http://a:8080"
+        assert tried[-1] == "http://b:8080"
+        assert len(tried) == 2
+        for s in list(grok_oauth._SESSIONS.values()):
+            grok_oauth._cleanup_session(s)
+        assert grok_oauth._SESSIONS == {}
+
+    @pytest.mark.asyncio
+    async def test_all_pool_proxies_dead_falls_back_to_direct(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        _clear_sessions()
+        env_path = _patch_env(tmp_path, monkeypatch)
+        _seed_proxy_pool(env_path, ("http://a:8080", "http://b:8080"))
+        _write_grok_retry_stub(tmp_path, monkeypatch)
+        monkeypatch.setenv("GROK_STUB_DEAD", "http://a:8080,http://b:8080")
+        monkeypatch.setenv("GROK_STUB_SLEEP", "30")
+
+        captured: list[dict | None] = []
+        orig_exec = asyncio.create_subprocess_exec
+
+        async def spy_exec(*args, **kwargs):
+            captured.append(kwargs.get("env"))
+            return await orig_exec(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spy_exec)
+
+        result = await start_device_auth_login()
+        assert result["device_url"].startswith("https://accounts.x.ai/oauth2/device")
+
+        tried = _captured_proxies(captured)
+        assert tried[0] == "http://a:8080"
+        assert tried[1] == "http://b:8080"
+        assert tried[-1] == ""  # direct fallback succeeded
+        for s in list(grok_oauth._SESSIONS.values()):
+            grok_oauth._cleanup_session(s)
+        assert grok_oauth._SESSIONS == {}
+
+    @pytest.mark.asyncio
+    async def test_every_candidate_fails_raises(self, tmp_path, monkeypatch) -> None:
+        _clear_sessions()
+        env_path = _patch_env(tmp_path, monkeypatch)
+        _seed_proxy_pool(env_path, ("http://a:8080",))
+        _write_grok_retry_stub(tmp_path, monkeypatch)
+        # Both the pool proxy and the direct fallback are dead.
+        monkeypatch.setenv("GROK_STUB_DEAD", "http://a:8080,direct")
+
+        captured: list[dict | None] = []
+        orig_exec = asyncio.create_subprocess_exec
+
+        async def spy_exec(*args, **kwargs):
+            captured.append(kwargs.get("env"))
+            return await orig_exec(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spy_exec)
+
+        with pytest.raises(RuntimeError, match="device verification URL"):
+            await start_device_auth_login()
+        # No session leaked.
+        assert grok_oauth._SESSIONS == {}
+        tried = _captured_proxies(captured)
+        assert "http://a:8080" in tried and "" in tried
+
+    @pytest.mark.asyncio
+    async def test_empty_pool_succeeds_directly(self, tmp_path, monkeypatch) -> None:
+        _clear_sessions()
+        _patch_env(tmp_path, monkeypatch)  # no pool
+        _write_grok_retry_stub(tmp_path, monkeypatch)  # nothing in DEAD list
+        monkeypatch.setenv("GROK_STUB_SLEEP", "30")
+
+        result = await start_device_auth_login()
+        assert result["device_url"].startswith("https://accounts.x.ai/oauth2/device")
+        for s in list(grok_oauth._SESSIONS.values()):
+            grok_oauth._cleanup_session(s)
+        assert grok_oauth._SESSIONS == {}
