@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
 
 import httpx
+import openai
 from loguru import logger
 from openai import AsyncOpenAI
 
@@ -176,9 +177,24 @@ class OpenAIChatProvider(BaseProvider):
             await client.close()
 
     async def list_model_ids(self) -> frozenset[str]:
-        """Return model ids from the provider's OpenAI-compatible models endpoint."""
-        payload = await self._client.models.list()
-        return extract_openai_model_ids(payload, provider_name=self._provider_name)
+        """Return model ids from the provider's OpenAI-compatible models endpoint.
+
+        Retries across API keys on authentication failures (401/403) so that
+        a single expired token does not defeat a provider that still has
+        at least one valid key in its pool.
+        """
+        while True:
+            try:
+                payload = await self._client.models.list()
+            except openai.AuthenticationError:
+                self._key_pool.mark_auth_failed()
+                if not self._key_pool.has_available_key:
+                    raise
+                self._client = self._build_client()
+                continue
+            except Exception:
+                raise
+            return extract_openai_model_ids(payload, provider_name=self._provider_name)
 
     def _build_request_body(
         self, request: MessagesRequest, thinking_enabled: bool | None = None
