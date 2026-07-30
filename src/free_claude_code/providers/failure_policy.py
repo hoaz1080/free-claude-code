@@ -1,6 +1,7 @@
 """Provider-owned SDK classification and retry qualification."""
 
 import json
+import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import replace
@@ -18,6 +19,12 @@ from free_claude_code.core.failures import ExecutionFailure, FailureKind
 
 MarkRateLimited = Callable[[float], None]
 ProviderFailureOverride = Callable[[Exception], ExecutionFailure | None]
+
+# Fallback when an upstream returns 429 but does not advertise a cooldown in
+# its headers. The OpenAI/Bedrock-style providers typically fall back to
+# 60s; longer-lived backends publish ``Retry-After`` so we honor it instead
+# of sitting idle for a default minute.
+DEFAULT_RATE_LIMIT_COOLDOWN = 60.0
 
 _RATE_LIMIT_MARKERS = frozenset({"rate_limit", "rate limit", "too many requests"})
 _OVERLOAD_MARKERS = frozenset(
@@ -217,13 +224,13 @@ def _classify_provider_failure(
 ) -> ExecutionFailure:
     if isinstance(exc, ExecutionFailure):
         if exc.kind == FailureKind.RATE_LIMIT:
-            mark_rate_limited(60)
+            mark_rate_limited(cooldown_seconds_from_exception(exc))
         return exc
 
     if isinstance(exc, openai.AuthenticationError):
         return _failure(FailureKind.AUTHENTICATION, 401, _AUTHENTICATION_MESSAGE, False)
     if isinstance(exc, openai.RateLimitError):
-        mark_rate_limited(60)
+        mark_rate_limited(cooldown_seconds_from_exception(exc))
         return _failure(FailureKind.RATE_LIMIT, 429, _RATE_LIMIT_MESSAGE, True)
     if isinstance(exc, openai.BadRequestError):
         return _failure(
@@ -248,7 +255,7 @@ def _classify_provider_failure(
     if isinstance(exc, openai.APIError):
         status = retryable_transient_status(exc)
         if status == 429:
-            mark_rate_limited(60)
+            mark_rate_limited(cooldown_seconds_from_exception(exc))
             return _failure(FailureKind.RATE_LIMIT, 429, _RATE_LIMIT_MESSAGE, True)
         if is_transient_overload_error(exc):
             return overloaded_provider_failure()
@@ -269,7 +276,7 @@ def _classify_provider_failure(
                 FailureKind.AUTHENTICATION, 401, _AUTHENTICATION_MESSAGE, False
             )
         if status == 429:
-            mark_rate_limited(60)
+            mark_rate_limited(cooldown_seconds_from_exception(exc))
             return _failure(FailureKind.RATE_LIMIT, 429, _RATE_LIMIT_MESSAGE, True)
         if status == 400:
             return _failure(
@@ -387,6 +394,61 @@ def _body_to_text(body: Any) -> str:
 
 def _has_marker(text: str, markers: frozenset[str]) -> bool:
     return any(marker in text for marker in markers)
+
+
+def cooldown_seconds_from_exception(exc: BaseException | None) -> float:
+    """Return the upstream-suggested cooldown for a 429, in seconds.
+
+    Honors the provider's ``Retry-After`` (RFC 7231) and ``X-RateLimit-Reset``
+    (epoch seconds) headers when present. Falls back to
+    ``DEFAULT_RATE_LIMIT_COOLDOWN`` (60s) when no hint is available so that
+    exhausted multi-key pools recover without manual intervention.
+
+    Accepts the raw SDK exception (httpx ``HTTPStatusError``, ``openai``
+    ``RateLimitError`` / ``APIError``) and also walks ``__cause__`` so that
+    wrapped ``ExecutionFailure`` instances still surface the original headers.
+    """
+    cooldown = _cooldown_seconds_from_headers(exc)
+    if cooldown is not None:
+        return cooldown
+    cause = getattr(exc, "__cause__", None) if exc is not None else None
+    cooldown = _cooldown_seconds_from_headers(cause)
+    if cooldown is not None:
+        return cooldown
+    return DEFAULT_RATE_LIMIT_COOLDOWN
+
+
+def _cooldown_seconds_from_headers(exc: BaseException | None) -> float | None:
+    """Inspect ``Retry-After`` and ``X-RateLimit-Reset`` headers if available."""
+    if exc is None:
+        return None
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    retry_after: Any = None
+    try:
+        retry_after = headers.get("retry-after")
+    except Exception:
+        return None
+    if retry_after is not None:
+        try:
+            return max(0.0, float(retry_after))
+        except TypeError, ValueError:
+            pass
+    reset_header: Any = None
+    try:
+        reset_header = headers.get("x-ratelimit-reset") or headers.get(
+            "X-RateLimit-Reset"
+        )
+    except Exception:
+        return None
+    if reset_header is not None:
+        try:
+            return max(0.0, float(reset_header) - time.time())
+        except TypeError, ValueError:
+            pass
+    return None
 
 
 def _is_retryable_status(status: int | None) -> bool:

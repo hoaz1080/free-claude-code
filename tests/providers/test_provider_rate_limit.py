@@ -751,3 +751,134 @@ class TestProviderRateLimiter:
 
         assert nim.is_blocked() is True
         assert openrouter.is_blocked() is False
+
+    def test_reactive_block_scoped_to_key_id(self) -> None:
+        """A key-scoped reactive block must not affect other keys in the pool."""
+        limiter = ProviderRateLimiter(rate_limit=100, rate_window=60)
+        limiter.set_active_key_id("primary-key")
+
+        limiter.extend_reactive_block(5.0, key_id="burnt-key")
+
+        # The active key (separate id) must remain usable.
+        assert limiter.is_blocked_for_key("primary-key") is False
+        assert limiter.is_blocked_for_key("another-fresh-key") is False
+
+        # The key that actually failed must be blocked.
+        assert limiter.is_blocked_for_key("burnt-key") is True
+        assert limiter.remaining_wait_for_key("burnt-key") > 4.0
+
+    def test_reactive_block_without_key_id_targets_active_key(self) -> None:
+        """No key_id => block goes to whichever key the limiter currently calls active.
+
+        Unrelated keys keep serving traffic while the active id cools down.
+        This docstring preserves the original intent (legacy code paths use
+        ``ProviderRateLimiter`` without key tracking); here we verify that
+        the documented per-key semantics apply even when the caller omits
+        ``key_id``.
+        """
+        limiter = ProviderRateLimiter(rate_limit=100, rate_window=60)
+        limiter.set_active_key_id("primary-key")
+        limiter.extend_reactive_block(3.0)  # No key_id passed.
+
+        # Block lands on the active key id only.
+        assert limiter.is_blocked_for_key("primary-key") is True
+        assert limiter.is_blocked_for_key("any-other-key") is False
+        assert limiter.is_blocked() is True
+
+    def test_set_active_key_id_changes_block_query_target(self) -> None:
+        """After rotating, the convenience helpers follow the new key."""
+        limiter = ProviderRateLimiter(rate_limit=100, rate_window=60)
+        limiter.set_active_key_id("key-a")
+        limiter.extend_reactive_block(5.0, key_id="key-a")
+        # Sanity: still blocked while active is the burnt key.
+        assert limiter.is_blocked() is True
+
+        # Rotation flips the active id; the convenience helpers must no
+        # longer report a block because key-b never failed.
+        limiter.set_active_key_id("key-b")
+        assert limiter.is_blocked() is False
+        assert limiter.remaining_wait() == 0.0
+
+    def test_expire_stale_blocks_drops_elapsed_entries(self) -> None:
+        # Pin monotonic at t0 *before* extending blocks so their stored
+        # deadlines reflect the mocked clock, not the real one.
+        with patch.object(rate_limit_module.time, "monotonic", return_value=100.0):
+            limiter = ProviderRateLimiter(rate_limit=100, rate_window=60)
+            limiter.set_active_key_id("present")
+            limiter.extend_reactive_block(0.2, key_id="ephemeral-1")
+            # long-burn deadline lands at t=115.0 — still cooling down at t=110.0.
+            limiter.extend_reactive_block(15.0, key_id="long-burn")
+            assert len(limiter._blocked_until_by_key) == 2
+
+        # Jump to t=110 — ephemeral-1 (deadline 100.2) has elapsed,
+        # long-burn (deadline 115.0) has not.
+        with patch.object(rate_limit_module.time, "monotonic", return_value=110.0):
+            limiter.expire_stale_blocks()
+
+        assert "ephemeral-1" not in limiter._blocked_until_by_key
+        assert "long-burn" in limiter._blocked_until_by_key
+
+    @pytest.mark.asyncio
+    async def test_execute_with_retry_succeeds_on_other_key_after_one_key_blocked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rotating to a fresh key after a 429 must let the next attempt succeed.
+
+        Mirrors the real ``OpenAIChatProvider._on_key_failure`` flow:
+        the hook notifies the provider, which then selects the next key and
+        tells the limiter which key id is now active. The reactive block
+        must stay pinned to the burnt key only, so the fresh key doesn't
+        inherit the cooldown.
+        """
+        import openai
+        from httpx import Request, Response
+
+        limiter = ProviderRateLimiter(rate_limit=100, rate_window=60)
+        sleep = AsyncMock()
+        monkeypatch.setattr(rate_limit_module.asyncio, "sleep", sleep)
+
+        # The limiter starts on the burnt key id; the test rotation hook
+        # flips it to ``fresh-key`` on the first 429.
+        limiter.set_active_key_id("burnt-key")
+
+        def rotate_to_fresh_key(_kind, _cooldown) -> None:
+            # Mirror what ``OpenAIChatProvider._on_key_failure`` does:
+            # after selecting the next key in the pool, call
+            # ``set_active_key_id`` so the limiter's block bookkeeping
+            # targets the new id only.
+            limiter.set_active_key_id("fresh-key")
+
+        attempts = 0
+
+        async def use_first_client_then_succeed():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise openai.RateLimitError(
+                    "rate limited",
+                    response=Response(
+                        429,
+                        request=Request("POST", "http://x"),
+                        headers={"retry-after": "1"},
+                    ),
+                    body={},
+                )
+            return "ok"
+
+        result = await limiter.execute_with_retry(
+            use_first_client_then_succeed,
+            max_retries=2,
+            base_delay=5.0,
+            max_delay=5.0,
+            jitter=0,
+            on_key_failure=rotate_to_fresh_key,
+        )
+
+        assert result == "ok"
+        # The burnt key was reactively blocked and stays blocked.
+        assert limiter.is_blocked_for_key("burnt-key") is True
+        # The fresh key was rotated to and never blocked ⇒ no inherited block.
+        assert limiter.is_blocked_for_key("fresh-key") is False
+        # The active key resolved through the helper matches the fresh one.
+        assert limiter.is_blocked() is False
+        assert limiter._active_key_id == "fresh-key"

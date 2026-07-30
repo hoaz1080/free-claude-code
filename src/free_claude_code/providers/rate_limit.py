@@ -16,6 +16,7 @@ from free_claude_code.core.rate_limit import StrictSlidingWindowLimiter
 from free_claude_code.core.trace import trace_event
 from free_claude_code.providers.failure_policy import (
     ProviderFailureOverride,
+    cooldown_seconds_from_exception,
     retryable_upstream_status,
     retryable_upstream_transport_error,
 )
@@ -63,7 +64,12 @@ class ProviderRateLimiter:
         self._proactive_limiter = StrictSlidingWindowLimiter(
             self._rate_limit, self._rate_window
         )
-        self._blocked_until: float = 0
+        # Reactive blocks are scoped per key when callers identify which key
+        # failed. Without a key id, fall back to a single legacy global slot so
+        # tests and ad-hoc callers keep their prior provider-wide semantics.
+        self._blocked_until_by_key: dict[str, float] = {}
+        self._blocked_until_global: float = 0.0
+        self._active_key_id: str | None = None
         self._concurrency_sem = asyncio.Semaphore(max_concurrency)
         logger.info(
             "ProviderRateLimiter initialized "
@@ -99,29 +105,88 @@ class ProviderRateLimiter:
             waited = True
         return waited
 
-    def extend_reactive_block(self, seconds: float) -> None:
+    def extend_reactive_block(
+        self, seconds: float, *, key_id: str | None = None
+    ) -> None:
         """
         Extend this provider's reactive block by at least ``seconds`` from now.
 
+        When ``key_id`` is provided, the block is scoped to that key only:
+        requests that route through a different key are unaffected, which lets
+        a healthy replacement key serve traffic immediately after a 429.
+
         Args:
             seconds: Positive minimum duration for the resulting block.
+            key_id: Optional identifier for the API key that hit the limit.
+                When omitted, falls back to the active key (or the legacy
+                global slot when no active key has been set).
         """
         if seconds <= 0:
             raise ValueError("reactive block duration must be > 0")
         now = time.monotonic()
-        self._blocked_until = max(self._blocked_until, now + seconds)
+        deadline = now + seconds
+        effective_key = key_id if key_id is not None else self._active_key_id
+        if effective_key is None:
+            self._blocked_until_global = max(self._blocked_until_global, deadline)
+            logger.warning(
+                "Provider rate limit set for {:.1f}s (reactive, global)",
+                max(0.0, self._blocked_until_global - now),
+            )
+            return
+        previous = self._blocked_until_by_key.get(effective_key, 0.0)
+        self._blocked_until_by_key[effective_key] = max(previous, deadline)
         logger.warning(
-            "Provider rate limit set for {:.1f}s (reactive)",
-            max(0.0, self._blocked_until - now),
+            "Provider rate limit set for {:.1f}s (reactive, key={})",
+            max(0.0, self._blocked_until_by_key[effective_key] - now),
+            effective_key,
         )
 
+    def set_active_key_id(self, key_id: str | None) -> None:
+        """Identify the API key that the next attempt will use.
+
+        Lets ``is_blocked`` and ``remaining_wait`` answer the question
+        "is the active key blocked?" without requiring callers to thread
+        the key id through every ``wait_if_blocked`` call.
+        """
+        self._active_key_id = key_id
+
+    def expire_stale_blocks(self) -> None:
+        """Drop per-key reactive blocks that already elapsed under
+        ``time.monotonic``. Keeps the bookkeeping map from growing without
+        bound under providers with very large key pools."""
+        now = time.monotonic()
+        stale = [
+            key
+            for key, deadline in self._blocked_until_by_key.items()
+            if deadline <= now
+        ]
+        for key in stale:
+            self._blocked_until_by_key.pop(key, None)
+
     def is_blocked(self) -> bool:
-        """Check if currently reactively blocked."""
-        return time.monotonic() < self._blocked_until
+        """Check if the currently active key (or global) is reactively blocked."""
+        return self.is_blocked_for_key(self._active_key_id)
+
+    def is_blocked_for_key(self, key_id: str | None) -> bool:
+        """Check whether this provider is blocked for ``key_id``."""
+        now = time.monotonic()
+        if now < self._blocked_until_global:
+            return True
+        return key_id is not None and now < self._blocked_until_by_key.get(key_id, 0.0)
 
     def remaining_wait(self) -> float:
-        """Get remaining reactive wait time in seconds."""
-        return max(0.0, self._blocked_until - time.monotonic())
+        """Get remaining reactive wait time for the active key in seconds."""
+        return self.remaining_wait_for_key(self._active_key_id)
+
+    def remaining_wait_for_key(self, key_id: str | None) -> float:
+        """Get remaining reactive wait time for ``key_id`` in seconds."""
+        now = time.monotonic()
+        deadline = self._blocked_until_global
+        if key_id is not None:
+            candidate = self._blocked_until_by_key.get(key_id, 0.0)
+            if candidate > deadline:
+                deadline = candidate
+        return max(0.0, deadline - now)
 
     @asynccontextmanager
     async def concurrency_slot(self) -> AsyncIterator[None]:
@@ -182,6 +247,9 @@ class ProviderRateLimiter:
 
         for attempt in range(total_attempts):
             await self.wait_if_blocked()
+            # Capture the active key id *before* the attempt because the
+            # key-rotation hook may run mid-flight and change _active_key_id.
+            attempt_key_id = self._active_key_id
 
             try:
                 return await fn(*args, **kwargs)
@@ -248,9 +316,14 @@ class ProviderRateLimiter:
                         else f"Upstream server error ({status})"
                     )
 
-                # Notify key-failure hook on 429 so caller can rotate keys
+                # Notify key-failure hook on 429 so caller can rotate keys.
+                # Honor upstream Retry-After / X-RateLimit-Reset when present
+                # so a single bad key does not eat 60s of system-wide recovery.
                 if status == 429 and on_key_failure is not None:
-                    on_key_failure(FailureKind.RATE_LIMIT, 60.0)
+                    on_key_failure(
+                        FailureKind.RATE_LIMIT,
+                        cooldown_seconds_from_exception(effective_error),
+                    )
 
                 last_exc = e
                 if attempt >= max_retries:
@@ -283,7 +356,7 @@ class ProviderRateLimiter:
                     delay_s=round(delay, 3),
                 )
                 if status is not None:
-                    self.extend_reactive_block(delay)
+                    self.extend_reactive_block(delay, key_id=attempt_key_id)
                 await asyncio.sleep(delay)
 
         assert last_exc is not None

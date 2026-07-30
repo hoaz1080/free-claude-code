@@ -147,10 +147,13 @@ class OpenAIChatProvider(BaseProvider):
         self._client = self._build_client()
         return next_key
 
-    def _on_key_failure(self, kind: FailureKind, _cooldown: float) -> None:
+    def _on_key_failure(self, kind: FailureKind, cooldown: float) -> None:
         """Handle key failure before retry: mark and rotate.
 
-        Includes the failed key id in error attribution logging.
+        Includes the failed key id in error attribution logging. The
+        ``cooldown`` argument comes from ``cooldown_seconds_from_exception``
+        so we honor the upstream's Retry-After header when available, and
+        tell the rate limiter to scope reactive blocks to the new active key.
         """
         failed_key = self._key_pool.current_key_id
         if kind == FailureKind.AUTHENTICATION:
@@ -162,13 +165,18 @@ class OpenAIChatProvider(BaseProvider):
             self._key_pool.mark_auth_failed()
         elif kind == FailureKind.RATE_LIMIT:
             logger.warning(
-                "{}: key {} rate-limited (429), rotating to next key+proxy",
+                "{}: key {} rate-limited (429, cooldown={:.1f}s), rotating to next key+proxy",
                 self._provider_name,
                 failed_key,
+                cooldown,
             )
-            self._key_pool.mark_rate_limited(60.0)
+            self._key_pool.mark_rate_limited(cooldown)
         if self._key_pool.has_available_key:
             self._rotate_key(kind.value)
+            # Sync the rate limiters per-key reactive bookkeeping to follow
+            # the rotation; without this, the freshly rotated key inherits any
+            # stale block set against the now-cooling failed key.
+            self._rate_limiter.set_active_key_id(self._key_pool.current_key_id)
 
     async def cleanup(self) -> None:
         """Release HTTP client resources."""
@@ -252,6 +260,9 @@ class OpenAIChatProvider(BaseProvider):
         while True:
             try:
                 create_body = self._prepare_create_body(body)
+                # Per-key reactive bookkeeping stays in sync with the client
+                # whose API key is about to drive this attempt.
+                self._rate_limiter.set_active_key_id(self._key_pool.current_key_id)
                 stream = await self._rate_limiter.execute_with_retry(
                     self._client.chat.completions.create,
                     provider_failure_override=self._provider_failure_override,

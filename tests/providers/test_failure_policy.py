@@ -373,3 +373,84 @@ def test_attached_streamed_error_body_remains_bounded() -> None:
 
     assert f"truncated after {ERROR_DETAIL_DISPLAY_CAP_BYTES} bytes" in failure.message
     assert "x" * 100 in failure.message
+
+
+def test_429_honors_retry_after_header_in_httpx_status_error() -> None:
+    """classify_provider_failure forwards the upstream Retry-After cooldown."""
+    request = httpx.Request("POST", "https://provider.test/v1/chat/completions")
+    response = httpx.Response(
+        429,
+        request=request,
+        headers={"retry-after": "2.5"},
+    )
+    error = httpx.HTTPStatusError(
+        "Too Many Requests",
+        request=request,
+        response=response,
+    )
+    mark = Mock()
+
+    failure = classify_provider_failure(
+        error,
+        provider_name="PROVIDER",
+        read_timeout_s=None,
+        request_id=None,
+        mark_rate_limited=mark,
+    )
+
+    mark.assert_called_once()
+    cooldown_arg = mark.call_args.args[0]
+    assert 2.0 <= cooldown_arg <= 3.0
+    assert failure.kind is FailureKind.RATE_LIMIT
+
+
+def test_429_falls_back_to_default_cooldown_without_retry_after() -> None:
+    """Without Retry-After, the default fallback is the platform-wide default."""
+    request = httpx.Request("POST", "https://provider.test/v1/chat/completions")
+    response = httpx.Response(429, request=request)
+    error = httpx.HTTPStatusError(
+        "Too Many Requests",
+        request=request,
+        response=response,
+    )
+    mark = Mock()
+
+    classify_provider_failure(
+        error,
+        provider_name="PROVIDER",
+        read_timeout_s=None,
+        request_id=None,
+        mark_rate_limited=mark,
+    )
+
+    mark.assert_called_once()
+    from free_claude_code.providers.failure_policy import DEFAULT_RATE_LIMIT_COOLDOWN
+
+    assert mark.call_args.args[0] == DEFAULT_RATE_LIMIT_COOLDOWN
+
+
+def test_openai_rate_limit_honors_retry_after_header() -> None:
+    """openai.RateLimitError carries a Response; the header is forwarded."""
+    request = httpx.Request("POST", "https://provider.test/v1/chat/completions")
+    response = httpx.Response(
+        429,
+        request=request,
+        headers={"retry-after": "7"},
+    )
+    error = openai.RateLimitError(
+        "rate limited",
+        response=response,
+        body={},
+    )
+    mark = Mock()
+
+    classify_provider_failure(
+        error,
+        provider_name="PROVIDER",
+        read_timeout_s=None,
+        request_id=None,
+        mark_rate_limited=mark,
+    )
+
+    mark.assert_called_once()
+    assert mark.call_args.args[0] == 7.0

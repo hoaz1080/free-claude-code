@@ -43,9 +43,16 @@ class ImmediateRetryProviderRateLimiter(ProviderRateLimiter):
         kwargs.update(base_delay=0.0, max_delay=0.0, jitter=0.0)
         return await super().execute_with_retry(fn, *args, **kwargs)
 
-    def extend_reactive_block(self, seconds: float) -> None:
-        """Leave reactive timing to the limiter's dedicated unit tests."""
-        del seconds
+    def extend_reactive_block(
+        self, seconds: float, *, key_id: str | None = None
+    ) -> None:
+        """Leave reactive timing to the limiter's dedicated unit tests.
+
+        Acknowledge the ``key_id`` kwarg so callers that isolate blocks
+        per-key (per-key reactive slot bookkeeping) don't trip the
+        unexpected-keyword guard.
+        """
+        del seconds, key_id
 
 
 def passthrough_rate_limiter() -> ProviderRateLimiter:
