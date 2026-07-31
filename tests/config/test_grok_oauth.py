@@ -13,15 +13,18 @@ from free_claude_code.config.custom_providers import (
     load_custom_providers_from_managed_env,
 )
 from free_claude_code.config.grok_oauth import (
+    GROK_KNOWN_MODEL_IDS,
     GROK_OAUTH_BASE_URL,
     GROK_OAUTH_DEFAULT_HEADERS,
     GROK_OAUTH_PROVIDER_ID,
     GROK_OIDC_SCOPE,
     cancel_login,
     harvest_token_from_text,
+    load_cached_grok_model_ids,
     mask_proxy_url,
     poll_login,
     start_device_auth_login,
+    store_cached_grok_model_ids,
     upsert_grok_oauth_account,
 )
 
@@ -565,3 +568,45 @@ class TestLoginProxyRetry:
         for s in list(grok_oauth._SESSIONS.values()):
             grok_oauth._cleanup_session(s)
         assert grok_oauth._SESSIONS == {}
+
+
+class TestGrokModelIdCache:
+    """On-disk fallback for grok's model listing (survives bearer expiry/restart)."""
+
+    def test_round_trip(self, tmp_path, monkeypatch) -> None:
+        cache = tmp_path / "grok-models.json"
+        monkeypatch.setattr(grok_oauth, "grok_model_cache_path", lambda: cache)
+        store_cached_grok_model_ids(frozenset({"grok-a", "grok-b"}))
+        assert load_cached_grok_model_ids() == frozenset({"grok-a", "grok-b"})
+        assert cache.is_file()
+
+    def test_missing_file_returns_empty(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(
+            grok_oauth,
+            "grok_model_cache_path",
+            lambda: tmp_path / "absent.json",
+        )
+        assert load_cached_grok_model_ids() == frozenset()
+
+    def test_corrupt_json_returns_empty(self, tmp_path, monkeypatch) -> None:
+        cache = tmp_path / "grok-models.json"
+        cache.write_text("{not json", encoding="utf-8")
+        monkeypatch.setattr(grok_oauth, "grok_model_cache_path", lambda: cache)
+        assert load_cached_grok_model_ids() == frozenset()
+
+    def test_non_dict_root_returns_empty(self, tmp_path, monkeypatch) -> None:
+        cache = tmp_path / "grok-models.json"
+        cache.write_text("[]", encoding="utf-8")
+        monkeypatch.setattr(grok_oauth, "grok_model_cache_path", lambda: cache)
+        assert load_cached_grok_model_ids() == frozenset()
+
+    def test_store_creates_parent_dir(self, tmp_path, monkeypatch) -> None:
+        cache = tmp_path / "nested" / "dir" / "grok-models.json"
+        monkeypatch.setattr(grok_oauth, "grok_model_cache_path", lambda: cache)
+        store_cached_grok_model_ids(frozenset({"grok-x"}))
+        assert cache.is_file()
+        assert load_cached_grok_model_ids() == frozenset({"grok-x"})
+
+    def test_known_model_ids_default_is_empty(self) -> None:
+        """The static sentinel is empty on purpose (cache is the real fallback)."""
+        assert GROK_KNOWN_MODEL_IDS == ()

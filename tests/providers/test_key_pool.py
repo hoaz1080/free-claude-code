@@ -231,3 +231,34 @@ class TestProxyConnectivity:
     async def test_unreachable_proxy_returns_false(self) -> None:
         result = await _test_proxy_connectivity("http://127.0.0.1:1", timeout=1.0)
         assert result is False
+
+
+class TestApiKeyPoolListingRotation:
+    """``advance_for_listing``/``key_count`` retry across keys without penalties."""
+
+    def test_key_count_reflects_pool_size(self) -> None:
+        assert ApiKeyPool(["k1", "k2", "k3"]).key_count == 3
+
+    def test_advance_for_listing_moves_to_next_key(self) -> None:
+        pool = ApiKeyPool(["k1", "k2", "k3"], health_check_proxies=False)
+        assert pool.current_key == "k1"
+        pool.advance_for_listing()
+        assert pool.current_key == "k2"
+        pool.advance_for_listing()
+        assert pool.current_key == "k3"
+        pool.advance_for_listing()
+        assert pool.current_key == "k1"  # wraps around
+
+    def test_advance_for_listing_leaves_key_state_untouched(self) -> None:
+        pool = ApiKeyPool(["k1", "k2"], health_check_proxies=False)
+        pool.advance_for_listing()
+        assert pool._entries[0].permanently_failed is False
+        assert pool._entries[0].cooldown_until == 0.0
+        assert pool._entries[1].permanently_failed is False
+        assert pool._entries[1].cooldown_until == 0.0
+
+    def test_advance_for_listing_single_key_is_safe(self) -> None:
+        pool = ApiKeyPool(["only"], health_check_proxies=False)
+        pool.advance_for_listing()
+        assert pool.current_key == "only"
+        assert pool._index == 0

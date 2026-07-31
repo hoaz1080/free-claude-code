@@ -11,6 +11,11 @@ import openai
 from loguru import logger
 from openai import AsyncOpenAI
 
+from free_claude_code.config.grok_oauth import (
+    GROK_KNOWN_MODEL_IDS,
+    load_cached_grok_model_ids,
+    store_cached_grok_model_ids,
+)
 from free_claude_code.core.anthropic import (
     ContentType,
     HeuristicToolParser,
@@ -184,12 +189,36 @@ class OpenAIChatProvider(BaseProvider):
         if client is not None:
             await client.close()
 
-    async def list_model_ids(self) -> frozenset[str]:
-        """Return model ids from the provider's OpenAI-compatible models endpoint.
+    @property
+    def _is_grok_provider(self) -> bool:
+        """Whether this provider targets the Grok CLI chat proxy.
 
-        Retries across API keys on authentication failures (401/403) so that
-        a single expired token does not defeat a provider that still has
-        at least one valid key in its pool.
+        The grok OAuth provider is provisioned as a custom provider pointing at
+        ``cli-chat-proxy.grok.com``; detecting it by base_url (rather than the
+        profile id) keeps the carve-out tied to where traffic actually goes.
+        """
+        return "cli-chat-proxy.grok.com" in self._base_url
+
+    async def list_model_ids(self) -> frozenset[str]:
+        """Return model ids advertised by the provider's models endpoint.
+
+        Retries across API keys on authentication failures (401/403) so a
+        single expired token cannot defeat a provider that still has a valid
+        key (see ``_list_model_ids_default``). For the Grok OAuth provider,
+        listing is graceful and never permanently disables a key — see
+        ``_list_grok_model_ids``.
+        """
+        if self._is_grok_provider:
+            return await self._list_grok_model_ids()
+        return await self._list_model_ids_default()
+
+    async def _list_model_ids_default(self) -> frozenset[str]:
+        """Retry across keys on auth failures; permanently disable a 401 key.
+
+        The non-grok posture: a 401/403 from the models endpoint is treated as
+        proof the key is revoked (it would fail chat too), so it is permanently
+        disabled and we rotate to the next valid key, raising only once every
+        key is exhausted.
         """
         while True:
             try:
@@ -203,6 +232,51 @@ class OpenAIChatProvider(BaseProvider):
             except Exception:
                 raise
             return extract_openai_model_ids(payload, provider_name=self._provider_name)
+
+    async def _list_grok_model_ids(self) -> frozenset[str]:
+        """List Grok models without ever permanently disabling a key.
+
+        The Grok OAuth bearer has a short (~6h) TTL and is renewed only by
+        re-logging in; a 401 from the optional catalog endpoint therefore means
+        the bearer expired — not that the key is revoked. Permanently disabling
+        it here would also kill it for chat and force a re-login to recover.
+        Instead we probe ``/v1/models`` once per pool key, rotating without
+        penalty on any failure, and on an all-key failure fall back to the cached
+        last successful listing (``load_cached_grok_model_ids``) so the catalog
+        stays populated across restarts and bearer expiry.
+        """
+        attempts = self._key_pool.key_count
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                payload = await self._client.models.list()
+            except Exception as error:
+                last_error = error
+                logger.warning(
+                    "{}: grok model listing failed on key {} ({}); rotating "
+                    "without disabling",
+                    self._provider_name,
+                    self._key_pool.current_key_id,
+                    type(error).__name__,
+                )
+                if attempt + 1 < attempts:
+                    self._key_pool.advance_for_listing()
+                    self._client = self._build_client()
+                continue
+            ids = extract_openai_model_ids(payload, provider_name=self._provider_name)
+            store_cached_grok_model_ids(ids)
+            return ids
+        suffix = f" (last error: {type(last_error).__name__})" if last_error else ""
+        logger.warning(
+            "{}: grok model listing exhausted all {} key(s){}; using fallback "
+            "cache. Re-add the Grok account via Admin if models look stale — "
+            "the OAuth bearer may have expired.",
+            self._provider_name,
+            attempts,
+            suffix,
+        )
+        cached = load_cached_grok_model_ids()
+        return cached or frozenset(GROK_KNOWN_MODEL_IDS)
 
     def _build_request_body(
         self, request: MessagesRequest, thinking_enabled: bool | None = None

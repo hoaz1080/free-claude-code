@@ -177,6 +177,15 @@ class ApiKeyPool:
         )
 
     @property
+    def key_count(self) -> int:
+        """Return the total number of keys in the pool regardless of state.
+
+        Catalog-listing paths use this to bound a no-penalty sweep that probes
+        ``/v1/models`` once per key (every key tried at most once).
+        """
+        return len(self._entries)
+
+    @property
     def _all_permanently_failed(self) -> bool:
         return all(e.permanently_failed for e in self._entries)
 
@@ -258,6 +267,19 @@ class ApiKeyPool:
         for entry in self._entries:
             if not entry.permanently_failed:
                 entry.cooldown_until = 0.0
+
+    def advance_for_listing(self) -> None:
+        """Move to the next pool entry WITHOUT penalising the current key.
+
+        Catalog-listing paths retry across keys when the optional ``/v1/models``
+        probe rejects one key, but must NOT permanently disable it — the Grok
+        OAuth bearer can be temporarily expired (the catalog endpoint is not
+        authoritative proof a key is revoked, and a key that fails listing must
+        stay usable for chat). The caller bounds iteration by ``key_count`` so
+        every key is tried at most once; this just advances the rotation index.
+        """
+        if self._entries:
+            self._index = (self._index + 1) % len(self._entries)
 
     def _rotate(self, *, prefer_different_proxy: bool = False) -> None:
         """Move index to the next available key.

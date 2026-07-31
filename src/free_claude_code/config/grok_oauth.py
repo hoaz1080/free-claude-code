@@ -36,6 +36,7 @@ from free_claude_code.config.custom_providers import (
     load_custom_providers_from_managed_env,
     save_custom_providers_to_managed_env,
 )
+from free_claude_code.config.paths import grok_model_cache_path
 
 GROK_OAUTH_PROVIDER_ID = "grok_oauth"
 GROK_OAUTH_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
@@ -55,6 +56,17 @@ GROK_OAUTH_DEFAULT_HEADERS: tuple[tuple[str, str], ...] = (
     ("x-grok-client-version", GROK_CLI_VERSION),
     ("x-grok-client-surface", GROK_CLIENT_SURFACE),
 )
+
+# Sentinel model ids for the ``grok_oauth`` provider used ONLY as a last resort
+# when a live ``/v1/models`` probe fails for every pool key AND no prior
+# successful listing has been persisted to disk (``load_cached_grok_model_ids``).
+# Intentionally empty: grok's chat-proxy lineup rotates with the CLI version
+# and is not hard-codable without a live probe. The on-disk cache written from
+# the last live success is the real fallback, so this only matters before the
+# first successful listing of a freshly-provisioned account — at which point a
+# graceful empty result (no permanent key disable, no scary error banner) is
+# preferable to fabricating ids that would 404 at chat time.
+GROK_KNOWN_MODEL_IDS: tuple[str, ...] = ()
 
 # Env vars the grok CLI (a Rust/reqwest client) honours for outbound proxying.
 # Setting all three covers http(s) and socks5 outbound from both the OAuth
@@ -372,6 +384,48 @@ def harvest_token(work_home: Path) -> str | None:
     except OSError:
         return None
     return harvest_token_from_text(text)
+
+
+def load_cached_grok_model_ids() -> frozenset[str]:
+    """Return model ids persisted from grok's last successful ``/v1/models`` listing.
+
+    Reads ``~/.fcc/grok-models.json`` (``{"models": [ids...]}``). Returns an
+    empty frozenset when the cache is absent or corrupt, so callers can fall
+    back to ``GROK_KNOWN_MODEL_IDS``. The cache is the authoritative fallback
+    when a live listing fails (e.g. the OAuth bearer has expired) — it keeps
+    the catalog populated across restarts without a permanent key disable.
+    """
+
+    path = grok_model_cache_path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return frozenset()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError, TypeError:
+        logger.warning("grok model cache at {} is corrupt; ignoring", path)
+        return frozenset()
+    if not isinstance(parsed, dict):
+        return frozenset()
+    raw = parsed.get("models")
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(mid.strip() for mid in raw if isinstance(mid, str) and mid.strip())
+
+
+def store_cached_grok_model_ids(model_ids: frozenset[str]) -> None:
+    """Persist a successful grok model listing as the on-disk fallback cache."""
+
+    path = grok_model_cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"models": sorted(model_ids)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError as error:
+        logger.warning("could not persist grok model cache at {}: {}", path, error)
 
 
 def _expired(session: GrokLoginSession, now: float | None = None) -> bool:

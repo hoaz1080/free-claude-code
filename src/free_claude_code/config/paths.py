@@ -10,6 +10,7 @@ MESSAGING_STATE_DIRNAME = "agent_workspace"
 FCC_LOGS_DIRNAME = "logs"
 SERVER_LOG_FILENAME = "server.log"
 CODEX_MODEL_CATALOG_FILENAME = "codex-model-catalog.json"
+GROK_MODEL_CACHE_FILENAME = "grok-models.json"
 
 
 def config_dir_path() -> Path:
@@ -50,3 +51,14 @@ def codex_model_catalog_path() -> Path:
     """Return the generated Codex model catalog path."""
 
     return config_dir_path() / CODEX_MODEL_CATALOG_FILENAME
+
+
+def grok_model_cache_path() -> Path:
+    """Return the persisted grok model-list fallback cache path.
+
+    Holds the ids captured from grok's last successful ``/v1/models`` listing
+    so the catalog can repopulate them even when the OAuth bearer has expired
+    (see ``free_claude_code.config.grok_oauth``).
+    """
+
+    return config_dir_path() / GROK_MODEL_CACHE_FILENAME
