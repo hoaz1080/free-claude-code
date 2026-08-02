@@ -148,3 +148,93 @@ def test_models_list_works_with_empty_discovery_catalog():
         "claude-3-freecc-no-thinking/open_router/anthropic/claude-opus",
     ]
     assert "claude-sonnet-4-20250514" in ids
+
+
+# ==================== FCC_ALLOWED_MODELS allowlist tests ====================
+
+
+def test_models_list_allows_empty_env_exposes_all():
+    # Default (empty fcc_allowed_models) exposes all cached models.
+    app = create_test_app(_settings())
+    _cache_models(app, "deepseek", "deepseek-chat", "reasoner")
+    _cache_models(app, "open_router", "meta/llama-3.3", "anthropic/claude-opus")
+
+    response = TestClient(app).get("/v1/models")
+
+    assert response.status_code == 200
+    ids = [item["id"] for item in response.json()["data"]]
+    assert "anthropic/deepseek/deepseek-chat" in ids
+    assert "anthropic/deepseek/reasoner" in ids
+    assert "anthropic/open_router/meta/llama-3.3" in ids
+    assert "anthropic/open_router/anthropic/claude-opus" in ids
+
+
+def test_models_list_filters_cached_models_to_allowlist(monkeypatch):
+    monkeypatch.setenv(
+        "FCC_ALLOWED_MODELS", "deepseek/deepseek-chat,open_router/meta/llama-3.3"
+    )
+    app = create_test_app(_settings())
+    _cache_models(app, "deepseek", "deepseek-chat", "reasoner")
+    _cache_models(app, "open_router", "meta/llama-3.3", "anthropic/claude-opus")
+
+    response = TestClient(app).get("/v1/models")
+
+    assert response.status_code == 200
+    ids = [item["id"] for item in response.json()["data"]]
+    # Allowed cached models appear (with both variants).
+    assert "anthropic/deepseek/deepseek-chat" in ids
+    assert "claude-3-freecc-no-thinking/deepseek/deepseek-chat" in ids
+    assert "anthropic/open_router/meta/llama-3.3" in ids
+    assert "claude-3-freecc-no-thinking/open_router/meta/llama-3.3" in ids
+    # Not allowed: absent entirely (no thinking-only variant either).
+    assert "anthropic/deepseek/reasoner" not in ids
+    assert "anthropic/open_router/anthropic/claude-opus" not in ids
+
+
+def test_models_list_filters_configured_refs_by_allowlist(monkeypatch):
+    # model_opus points to open_router/anthropic/claude-opus; block it.
+    monkeypatch.setenv("FCC_ALLOWED_MODELS", "deepseek/deepseek-chat")
+    app = create_test_app(
+        _settings(
+            model_opus="open_router/anthropic/claude-opus",
+        )
+    )
+    _cache_models(app, "deepseek", "deepseek-chat")
+
+    response = TestClient(app).get("/v1/models")
+
+    assert response.status_code == 200
+    ids = [item["id"] for item in response.json()["data"]]
+    assert "anthropic/deepseek/deepseek-chat" in ids
+    assert "anthropic/open_router/anthropic/claude-opus" not in ids
+
+
+def test_models_list_allowlist_with_whitespace(monkeypatch):
+    monkeypatch.setenv(
+        "FCC_ALLOWED_MODELS", " deepseek/deepseek-chat , open_router/meta/llama-3.3 "
+    )
+    app = create_test_app(_settings())
+    _cache_models(app, "deepseek", "deepseek-chat", "reasoner")
+    _cache_models(app, "open_router", "meta/llama-3.3")
+
+    response = TestClient(app).get("/v1/models")
+
+    assert response.status_code == 200
+    ids = [item["id"] for item in response.json()["data"]]
+    assert "anthropic/deepseek/deepseek-chat" in ids
+    assert "anthropic/open_router/meta/llama-3.3" in ids
+    assert "anthropic/deepseek/reasoner" not in ids
+
+
+def test_models_list_allowlist_preserves_claude_compat_models(monkeypatch):
+    # The allowlist filters provider models; built-in Claude compat ids always show.
+    monkeypatch.setenv("FCC_ALLOWED_MODELS", "deepseek/deepseek-chat")
+    app = create_test_app(_settings())
+    _cache_models(app, "deepseek", "deepseek-chat")
+
+    response = TestClient(app).get("/v1/models")
+
+    assert response.status_code == 200
+    ids = [item["id"] for item in response.json()["data"]]
+    assert "claude-sonnet-4-20250514" in ids
+    assert "claude-fable-5" in ids

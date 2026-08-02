@@ -1,5 +1,6 @@
 """Model-list response construction for Claude-compatible clients."""
 
+import os
 from typing import Literal
 
 from pydantic import BaseModel
@@ -84,7 +85,20 @@ def build_models_list_response(
     models: list[ModelResponse] = []
     seen: set[str] = set()
 
+    # Build a set of model refs the user has explicitly allowed via env.
+    # Falls back to the Settings field when present; otherwise reads os.environ
+    # directly. Empty means everything is exposed (backward-compatible default).
+    allowed: frozenset[str] = frozenset()
+    raw_allow = (
+        getattr(settings, "fcc_allowed_models", None)
+        or os.environ.get("FCC_ALLOWED_MODELS", "")
+    ).strip()
+    if raw_allow:
+        allowed = frozenset(part.strip() for part in raw_allow.split(","))
+
     for ref in configured_chat_model_refs(settings):
+        if allowed and ref.model_ref not in allowed:
+            continue
         supports_thinking = runtime.cached_model_supports_thinking(
             ref.provider_id, ref.model_id
         )
@@ -96,6 +110,8 @@ def build_models_list_response(
         )
 
     for model_info in runtime.cached_prefixed_model_infos():
+        if allowed and model_info.model_id not in allowed:
+            continue
         _append_provider_model_variants(
             models,
             seen,

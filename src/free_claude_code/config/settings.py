@@ -183,6 +183,14 @@ class Settings(BaseSettings):
         default=None, validation_alias="ENABLE_HAIKU_THINKING"
     )
 
+    # Comma-separated prefixed model refs to expose in /v1/models and allowlist for /model selection.
+    # Format: "provider/model-id,provider2/model2-id,..."
+    # Empty (default) means all discovered/configured models are exposed.
+    fcc_allowed_models: str = Field(
+        default="",
+        validation_alias="FCC_ALLOWED_MODELS",
+    )
+
     # ==================== HTTP Client Timeouts ====================
     http_read_timeout: float = Field(
         default=120.0, validation_alias="HTTP_READ_TIMEOUT"
@@ -264,6 +272,7 @@ class Settings(BaseSettings):
     # Local Whisper: "tiny", "base", "small", "medium", "large-v2", "large-v3", "large-v3-turbo"
     # NVIDIA NIM: "nvidia/parakeet-ctc-1.1b-asr", "openai/whisper-large-v3", etc.
     whisper_model: str = Field(default="base", validation_alias="WHISPER_MODEL")
+
     # ==================== Bot Wrapper Config ====================
     telegram_bot_token: str | None = None
     allowed_telegram_user_id: str | None = None
